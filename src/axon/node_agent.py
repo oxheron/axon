@@ -122,6 +122,7 @@ async def start_vllm_worker_process(
     gpu_memory_utilization: float,
     max_model_len: int,
     dtype: str,
+    distributed_backend: str = "ray",
 ) -> asyncio.subprocess.Process:
     cmd = [
         sys.executable,
@@ -138,7 +139,7 @@ async def start_vllm_worker_process(
         "--pipeline-parallel-size",
         str(pipeline_parallel_size),
         "--distributed-executor-backend",
-        "ray",
+        distributed_backend,
         "--gpu-memory-utilization",
         str(gpu_memory_utilization),
         "--max-model-len",
@@ -233,10 +234,14 @@ async def handle_cluster_start(state: NodeRuntimeState) -> None:
         cfg.ray_head_address,
     )
 
-    await join_ray_cluster(cfg.ray_head_address)
-    state.ray_joined = True
+    if cfg.pipeline_parallel_size == 1:
+        LOGGER.info("Single-node mode: skipping Ray cluster join, using mp backend.")
+    else:
+        await join_ray_cluster(cfg.ray_head_address)
+        state.ray_joined = True
 
     if state.launch_vllm_worker:
+        backend = "mp" if cfg.pipeline_parallel_size == 1 else "ray"
         state.vllm_proc = await start_vllm_worker_process(
             model_name=cfg.model_name,
             pipeline_parallel_size=cfg.pipeline_parallel_size,
@@ -244,6 +249,7 @@ async def handle_cluster_start(state: NodeRuntimeState) -> None:
             gpu_memory_utilization=state.vllm_gpu_memory_utilization,
             max_model_len=state.vllm_max_model_len,
             dtype=state.vllm_dtype,
+            distributed_backend=backend,
         )
         LOGGER.info("vLLM worker started with pid=%s", state.vllm_proc.pid)
 
