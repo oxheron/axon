@@ -1,8 +1,6 @@
-fastapi
-uvicorn[standard]
-httpx
-pydantic
-ray
+# Default (NVIDIA / CUDA): Axon Python deps + PyPI vLLM + CUDA-capable torch from PyPI.
+# For AMD + ROCm see README: build PyTorch + vLLM for ROCm, then install requirements-base.txt
+# or requirements-amd.txt (no PyPI vLLM).
+-r requirements-base.txt
 vllm
 torch
-pynvml

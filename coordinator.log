@@ -1,0 +1,15 @@
+INFO:     Started server process [19078]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:39788 - "GET /healthz HTTP/1.1" 200 OK
+2026-04-14 22:51:23,101 INFO [coordinator] Registered node=3010b355438f-6ae18010 host=192.168.4.36:9000 vram=15.98GiB (1/1)
+2026-04-14 22:51:23,101 INFO [coordinator] Startup triggered with pipeline_parallel_size=1
+INFO:     127.0.0.1:39790 - "POST /register HTTP/1.1" 200 OK
+2026-04-14 22:51:23,127 INFO [coordinator] HTTP Request: POST http://192.168.4.36:9000/startup "HTTP/1.1 200 OK"
+2026-04-14 22:51:23,127 INFO [coordinator] Startup signal delivered to node=3010b355438f-6ae18010 (http://192.168.4.36:9000/startup)
+INFO:     127.0.0.1:39792 - "GET /status HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [19078]

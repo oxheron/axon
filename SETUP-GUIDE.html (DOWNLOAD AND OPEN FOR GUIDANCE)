@@ -181,11 +181,12 @@
 <div class="page">
 
   <h1>Axon Setup Guide</h1>
-  <p class="subtitle">Get Axon running on a Windows PC with an NVIDIA GPU.</p>
+  <p class="subtitle">Get Axon running on a Windows PC with an NVIDIA GPU (WSL2 path), or on native Linux with an AMD GPU using ROCm — see README for ROCm PyTorch/vLLM and Docker base images.</p>
 
   <h2>Requirements</h2>
   <ul>
-    <li>Windows PC with NVIDIA GPU (10 GB+ VRAM)</li>
+    <li><strong>This guide:</strong> Windows PC with NVIDIA GPU (10 GB+ VRAM) for the WSL2 workflow below</li>
+    <li><strong>AMD:</strong> use Linux with ROCm drivers; install ROCm PyTorch from PyTorch, then <code>pip install -r requirements-amd.txt</code> (see README)</li>
     <li>Internet connection</li>
   </ul>
 
@@ -287,6 +288,10 @@
       <tr>
         <td><code>nvidia-smi</code> not found in Ubuntu</td>
         <td>Make sure you installed the NVIDIA driver on Windows and restarted</td>
+      </tr>
+      <tr>
+        <td>AMD GPU on Linux</td>
+        <td>Use ROCm (driver + <code>rocm-smi</code>), a ROCm build of PyTorch/vLLM, and Docker image <code>vllm/vllm-openai-rocm</code> with <code>--build-arg VLLM_BASE_IMAGE=…</code> as in the README</td>
       </tr>
       <tr>
         <td><code>ray</code> command not found</td>

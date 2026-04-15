@@ -24,6 +24,7 @@ class ServerState:
     coordinator_url: str
     vllm_worker_url: str
     pipeline_ready: bool = False
+    vllm_ready: bool = False
     model_name: Optional[str] = None
     http_client: Optional[httpx.AsyncClient] = None
 
@@ -46,6 +47,28 @@ async def _poll_coordinator(state: ServerState) -> None:
         await asyncio.sleep(2.0)
 
 
+async def _poll_vllm_health(state: ServerState) -> None:
+    """
+    Poll the vLLM OpenAI server's `/health` endpoint.
+
+    Axon's coordinator can report `pipeline_ready` as soon as startup is triggered,
+    but the local vLLM worker may still be loading weights (or may have crashed).
+    """
+    while True:
+        if not state.pipeline_ready:
+            state.vllm_ready = False
+            await asyncio.sleep(1.0)
+            continue
+
+        try:
+            r = await state.http_client.get(f"{state.vllm_worker_url}/health")
+            state.vllm_ready = r.status_code == 200
+        except Exception:  # noqa: BLE001
+            state.vllm_ready = False
+
+        await asyncio.sleep(2.0)
+
+
 def create_app(state: ServerState) -> FastAPI:
     app = FastAPI(title="Axon Inference Server", version="0.1.0")
 
@@ -55,6 +78,7 @@ def create_app(state: ServerState) -> FastAPI:
             timeout=httpx.Timeout(connect=10.0, read=None, write=None, pool=None)
         )
         asyncio.create_task(_poll_coordinator(state))
+        asyncio.create_task(_poll_vllm_health(state))
 
     @app.on_event("shutdown")
     async def shutdown_event() -> None:
@@ -63,8 +87,9 @@ def create_app(state: ServerState) -> FastAPI:
     @app.get("/healthz")
     async def healthz() -> dict:
         return {
-            "ok": state.pipeline_ready,
+            "ok": state.pipeline_ready and state.vllm_ready,
             "pipeline_ready": state.pipeline_ready,
+            "vllm_ready": state.vllm_ready,
             "model_name": state.model_name,
         }
 
@@ -72,6 +97,8 @@ def create_app(state: ServerState) -> FastAPI:
     async def proxy_v1(request: Request, path: str):
         if not state.pipeline_ready:
             raise HTTPException(status_code=503, detail="Pipeline not ready")
+        if not state.vllm_ready:
+            raise HTTPException(status_code=503, detail="vLLM worker not ready")
 
         target = f"{state.vllm_worker_url}/v1/{path}"
         body = await request.body()

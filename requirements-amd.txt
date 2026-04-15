@@ -1,0 +1,37 @@
+# AMD GPU (Linux, ROCm) — Axon deps on top of vLLM’s official ROCm prebuilt wheel.
+#
+# From the repo root you can run the same steps automatically:
+#   bash scripts/install_axon_amd.sh
+#   bash scripts/install_axon_amd.sh --nightly   # ROCm 7.2.1 nightlies (rocm721)
+#
+# The ROCm vLLM wheel bundles PyTorch and validated dependencies; do not install
+# torch / torchvision / torchaudio from PyPI for that path (upstream warns they may
+# not match the compiled ROCm kernels). If you need a different ROCm or your own
+# PyTorch, build vLLM from source per upstream instead.
+#
+# Docs (AMD tab): https://docs.vllm.ai/en/latest/getting_started/installation/gpu.html
+#
+# Prebuilt variants (upstream): ROCm 7.0 (rocm700) on released wheels; ROCm 7.2.1
+# (rocm721) from the nightly index. Inspect current wheels: https://wheels.vllm.ai/rocm/vllm
+#
+# Recommended: Python 3.12, glibc >= 2.35, and uv (extra index is prioritized over PyPI):
+#   uv venv --python 3.12 --seed --managed-python
+#   source .venv/bin/activate
+#   uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/ --upgrade
+#   uv pip install --no-cache-dir -r requirements-amd.txt
+#
+# Plain pip often picks the CUDA vLLM wheel from PyPI. If you must use pip, pin the
+# local version and full wheel index, for example:
+#   pip install vllm==0.18.0+rocm700 --extra-index-url https://wheels.vllm.ai/rocm/0.18.0/rocm700
+#
+# Latest / ROCm 7.2.1 nightlies (rocm721; first variant line from upstream):
+#   export VLLM_ROCM_VARIANT=$(curl -s https://wheels.vllm.ai/rocm/nightly | grep -oP 'rocm\d+' | head -1 | sed 's/%2B/+/g')
+#   uv pip install --pre vllm \
+#     --extra-index-url https://wheels.vllm.ai/rocm/nightly/${VLLM_ROCM_VARIANT} \
+#     --index-strategy unsafe-best-match
+#
+# Prerequisites: ROCm on the host — https://rocm.docs.amd.com/
+#
+# Helps vLLM’s ROCm path when NVML/CUDA is absent (optional but recommended on bare metal).
+amdsmi
+-r requirements-base.txt
