@@ -3,20 +3,13 @@ import asyncio
 import json
 import logging
 import os
-import time
-import uuid
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Optional
 
 import httpx
-import ray
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
-from vllm import SamplingParams
-from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import Response, StreamingResponse
 
 
 logging.basicConfig(
@@ -26,83 +19,54 @@ logging.basicConfig(
 LOGGER = logging.getLogger(__name__)
 
 
-class StartupConfig(BaseModel):
-    model_name: str
-    pipeline_parallel_size: int = Field(..., ge=1)
-    ray_head_address: str
-
-
-class ChatMessage(BaseModel):
-    role: str
-    content: Any
-
-
-class ChatCompletionRequest(BaseModel):
-    model: Optional[str] = None
-    messages: List[ChatMessage]
-    max_tokens: Optional[int] = 256
-    temperature: Optional[float] = 0.7
-    top_p: Optional[float] = 1.0
-    stream: bool = False
-
-
 @dataclass
 class ServerState:
     coordinator_url: str
-    model_override: Optional[str]
-    gpu_memory_utilization: float
-    max_model_len: Optional[int]
-    dtype: Optional[str]
-    config: Optional[StartupConfig] = None
-    engine: Optional[AsyncLLMEngine] = None
+    vllm_worker_url: str
+    pipeline_ready: bool = False
+    vllm_ready: bool = False
+    model_name: Optional[str] = None
+    http_client: Optional[httpx.AsyncClient] = None
 
 
-def normalize_content(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        # OpenAI multi-part content (text/image) simplified for barebones setup.
-        parts = []
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                parts.append(item.get("text", ""))
-        return "\n".join(parts)
-    return str(content)
+async def _poll_coordinator(state: ServerState) -> None:
+    attempt = 0
+    while True:
+        try:
+            r = await state.http_client.get(f"{state.coordinator_url}/status")
+            data = r.json()
+            if data.get("pipeline_ready"):
+                state.pipeline_ready = True
+                state.model_name = data.get("model_name")
+                LOGGER.info("Pipeline ready. Model: %s", state.model_name)
+                return
+        except Exception as exc:  # noqa: BLE001
+            if attempt % 10 == 0:
+                LOGGER.info("Waiting for coordinator: %s", exc)
+        attempt += 1
+        await asyncio.sleep(2.0)
 
 
-def messages_to_prompt(messages: List[ChatMessage]) -> str:
-    chunks: List[str] = []
-    for msg in messages:
-        content = normalize_content(msg.content).strip()
-        chunks.append(f"{msg.role}: {content}")
-    chunks.append("assistant:")
-    return "\n".join(chunks)
+async def _poll_vllm_health(state: ServerState) -> None:
+    """
+    Poll the vLLM OpenAI server's `/health` endpoint.
 
+    Axon's coordinator can report `pipeline_ready` as soon as startup is triggered,
+    but the local vLLM worker may still be loading weights (or may have crashed).
+    """
+    while True:
+        if not state.pipeline_ready:
+            state.vllm_ready = False
+            await asyncio.sleep(1.0)
+            continue
 
-async def wait_for_cluster_config(
-    coordinator_url: str,
-    timeout_s: float = 3600.0,
-    poll_interval_s: float = 2.0,
-) -> StartupConfig:
-    deadline = time.time() + timeout_s
-    status_url = f"{coordinator_url}/status"
-    config_url = f"{coordinator_url}/config"
+        try:
+            r = await state.http_client.get(f"{state.vllm_worker_url}/health")
+            state.vllm_ready = r.status_code == 200
+        except Exception:  # noqa: BLE001
+            state.vllm_ready = False
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        while time.time() < deadline:
-            try:
-                status_resp = await client.get(status_url)
-                status_resp.raise_for_status()
-                status = status_resp.json()
-                if status.get("pipeline_ready"):
-                    cfg_resp = await client.get(config_url)
-                    cfg_resp.raise_for_status()
-                    return StartupConfig(**cfg_resp.json())
-            except Exception as exc:  # noqa: BLE001 - continue polling until timeout.
-                LOGGER.info("Waiting for coordinator readiness: %s", exc)
-            await asyncio.sleep(poll_interval_s)
-
-    raise TimeoutError("Timed out waiting for coordinator startup config.")
+        await asyncio.sleep(2.0)
 
 
 def create_app(state: ServerState) -> FastAPI:
@@ -110,156 +74,79 @@ def create_app(state: ServerState) -> FastAPI:
 
     @app.on_event("startup")
     async def startup_event() -> None:
-        state.config = await wait_for_cluster_config(state.coordinator_url)
-        model_name = state.model_override or state.config.model_name
-
-        if not ray.is_initialized():
-            ray.init(address=state.config.ray_head_address, ignore_reinit_error=True)
-            LOGGER.info("Connected to Ray cluster at %s", state.config.ray_head_address)
-
-        engine_args = AsyncEngineArgs(
-            model=model_name,
-            tensor_parallel_size=1,
-            pipeline_parallel_size=state.config.pipeline_parallel_size,
-            distributed_executor_backend="ray",
-            gpu_memory_utilization=state.gpu_memory_utilization,
-            max_model_len=state.max_model_len,
-            dtype=state.dtype,
+        state.http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=None, write=None, pool=None)
         )
-        state.engine = AsyncLLMEngine.from_engine_args(engine_args)
-        LOGGER.info(
-            "AsyncLLMEngine initialized with model=%s pipeline_parallel_size=%s",
-            model_name,
-            state.config.pipeline_parallel_size,
-        )
+        asyncio.create_task(_poll_coordinator(state))
+        asyncio.create_task(_poll_vllm_health(state))
+
+    @app.on_event("shutdown")
+    async def shutdown_event() -> None:
+        await state.http_client.aclose()
 
     @app.get("/healthz")
     async def healthz() -> dict:
         return {
-            "ok": state.engine is not None,
-            "pipeline_ready": state.config is not None,
-            "model_name": (state.model_override or state.config.model_name)
-            if state.config
-            else None,
-            "pipeline_parallel_size": state.config.pipeline_parallel_size
-            if state.config
-            else None,
+            "ok": state.pipeline_ready and state.vllm_ready,
+            "pipeline_ready": state.pipeline_ready,
+            "vllm_ready": state.vllm_ready,
+            "model_name": state.model_name,
         }
 
-    @app.post("/v1/chat/completions")
-    async def chat_completions(req: ChatCompletionRequest):
-        if state.engine is None or state.config is None:
-            raise HTTPException(status_code=503, detail="Inference engine not ready.")
+    @app.api_route("/v1/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+    async def proxy_v1(request: Request, path: str):
+        if not state.pipeline_ready:
+            raise HTTPException(status_code=503, detail="Pipeline not ready")
+        if not state.vllm_ready:
+            raise HTTPException(status_code=503, detail="vLLM worker not ready")
 
-        model_name = state.model_override or state.config.model_name
-        if req.model and req.model != model_name:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Requested model '{req.model}' does not match active model '{model_name}'.",
-            )
+        target = f"{state.vllm_worker_url}/v1/{path}"
+        body = await request.body()
+        headers = {
+            k: v
+            for k, v in request.headers.items()
+            if k.lower() not in ("host", "content-length")
+        }
 
-        prompt = messages_to_prompt(req.messages)
-        sampling_params = SamplingParams(
-            temperature=req.temperature if req.temperature is not None else 0.7,
-            top_p=req.top_p if req.top_p is not None else 1.0,
-            max_tokens=req.max_tokens if req.max_tokens is not None else 256,
-        )
-        request_id = f"chatcmpl-{uuid.uuid4().hex}"
+        try:
+            body_json = json.loads(body) if body else {}
+        except Exception:  # noqa: BLE001
+            body_json = {}
+        is_streaming = bool(body_json.get("stream", False))
 
-        if req.stream:
-            return StreamingResponse(
-                stream_chat_response(state.engine, prompt, sampling_params, request_id, model_name),
-                media_type="text/event-stream",
-            )
-        return await non_stream_chat_response(
-            state.engine, prompt, sampling_params, request_id, model_name
-        )
+        try:
+            if is_streaming:
+
+                async def _stream_gen():
+                    async with state.http_client.stream(
+                        request.method,
+                        target,
+                        content=body,
+                        headers=headers,
+                        params=dict(request.query_params),
+                    ) as upstream:
+                        async for chunk in upstream.aiter_bytes():
+                            yield chunk
+
+                return StreamingResponse(_stream_gen(), media_type="text/event-stream")
+            else:
+                upstream = await state.http_client.request(
+                    request.method,
+                    target,
+                    content=body,
+                    headers=headers,
+                    params=dict(request.query_params),
+                )
+                return Response(
+                    content=upstream.content,
+                    status_code=upstream.status_code,
+                    media_type=upstream.headers.get("content-type", "application/json"),
+                )
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            LOGGER.error("vLLM worker unreachable: %s", exc)
+            raise HTTPException(status_code=502, detail="vLLM worker unreachable")
 
     return app
-
-
-async def stream_chat_response(
-    engine: AsyncLLMEngine,
-    prompt: str,
-    sampling_params: SamplingParams,
-    request_id: str,
-    model_name: str,
-):
-    created = int(time.time())
-    previous_text = ""
-    final_finish_reason = "stop"
-    yielded_role = False
-
-    async for output in engine.generate(prompt, sampling_params, request_id):
-        if not output.outputs:
-            continue
-        text = output.outputs[0].text
-        delta = text[len(previous_text) :]
-        previous_text = text
-        final_finish_reason = output.outputs[0].finish_reason or "stop"
-
-        if not yielded_role:
-            role_chunk = {
-                "id": request_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model_name,
-                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-            }
-            yield f"data: {json.dumps(role_chunk)}\n\n"
-            yielded_role = True
-
-        if delta:
-            content_chunk = {
-                "id": request_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model_name,
-                "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
-            }
-            yield f"data: {json.dumps(content_chunk)}\n\n"
-
-    end_chunk = {
-        "id": request_id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model_name,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": final_finish_reason}],
-    }
-    yield f"data: {json.dumps(end_chunk)}\n\n"
-    yield "data: [DONE]\n\n"
-
-
-async def non_stream_chat_response(
-    engine: AsyncLLMEngine,
-    prompt: str,
-    sampling_params: SamplingParams,
-    request_id: str,
-    model_name: str,
-) -> dict:
-    created = int(time.time())
-    final_text = ""
-    final_finish_reason = "stop"
-
-    async for output in engine.generate(prompt, sampling_params, request_id):
-        if not output.outputs:
-            continue
-        final_text = output.outputs[0].text
-        final_finish_reason = output.outputs[0].finish_reason or "stop"
-
-    return {
-        "id": request_id,
-        "object": "chat.completion",
-        "created": created,
-        "model": model_name,
-        "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": final_text},
-                "finish_reason": final_finish_reason,
-            }
-        ],
-    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -270,30 +157,13 @@ def parse_args() -> argparse.Namespace:
         required=os.environ.get("COORDINATOR_URL") is None,
         help="Coordinator base URL, e.g. http://10.0.0.10:8000",
     )
+    parser.add_argument(
+        "--vllm-worker-url",
+        default=os.environ.get("VLLM_WORKER_URL", "http://localhost:8100"),
+        help="vLLM worker base URL to proxy requests to (default: http://localhost:8100)",
+    )
     parser.add_argument("--host", default="0.0.0.0", help="Server bind host")
     parser.add_argument("--port", type=int, default=8080, help="Server bind port")
-    parser.add_argument(
-        "--model-name",
-        default=None,
-        help="Optional explicit model name override (defaults to coordinator config).",
-    )
-    parser.add_argument(
-        "--gpu-memory-utilization",
-        type=float,
-        default=0.72,
-        help="vLLM GPU memory utilization ratio (lower for 10-12GB testing).",
-    )
-    parser.add_argument(
-        "--max-model-len",
-        type=int,
-        default=1024,
-        help="vLLM max model context length for memory-constrained testing.",
-    )
-    parser.add_argument(
-        "--dtype",
-        default="float16",
-        help="vLLM model dtype (e.g. float16, bfloat16, auto).",
-    )
     return parser.parse_args()
 
 
@@ -301,10 +171,7 @@ def main() -> None:
     args = parse_args()
     state = ServerState(
         coordinator_url=args.coordinator_url.rstrip("/"),
-        model_override=args.model_name,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        max_model_len=args.max_model_len,
-        dtype=args.dtype,
+        vllm_worker_url=args.vllm_worker_url.rstrip("/"),
     )
     app = create_app(state)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

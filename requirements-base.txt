@@ -1,0 +1,13 @@
+# Shared Python dependencies for Axon (coordinator, node agent, inference server).
+# NVIDIA: use requirements.txt (adds vLLM + torch on top of this file).
+# AMD / ROCm: use requirements-amd.txt after the official ROCm vLLM wheel (bundles PyTorch); see that file.
+fastapi
+uvicorn[standard]
+httpx
+pydantic
+ray
+# vLLM <=0.10.0 + transformers>=4.54.0 hits a known AutoConfig collision for `aimv2`.
+# vLLM 0.9.x expects transformers>=4.51.1; keep a narrow compatible band until you use a newer vLLM.
+transformers>=4.51.1,<4.54.0
+pynvml
+# pynvml: NVIDIA only; harmless on AMD. VRAM falls back to PyTorch and/or rocm-smi in the node agent.

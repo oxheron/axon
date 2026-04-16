@@ -1,0 +1,84 @@
+CHANGES — Axon Inference Stack
+================================
+
+Hey! Here's a summary of what I changed and why.
+
+
+THE PROBLEM
+-----------
+The inference server (axon.server) was trying to spin up its own vLLM engine
+using Ray, which conflicted with the GPU already being used by the node agent's
+vLLM process. Both were fighting over the same GPU and it would crash.
+
+
+WHAT I CHANGED
+--------------
+
+1. src/axon/server.py  — REWRITTEN
+
+   The server no longer touches Ray or vLLM at all. It's now a lightweight
+   reverse proxy. When a request comes in on port 8080, it just forwards it
+   to the vLLM worker already running on port 8100 (started by the node agent).
+
+   - Removed: Ray connection, AsyncLLMEngine, SamplingParams, all vLLM imports
+   - Added: httpx reverse proxy that forwards all /v1/* traffic to port 8100
+   - Streaming still works end-to-end (SSE passes straight through)
+   - The server polls the coordinator in the background until the pipeline is
+     ready, then starts accepting traffic. Returns HTTP 503 until then.
+   - New flag: --vllm-worker-url (default: http://localhost:8100)
+   - Removed flags: --model-name, --gpu-memory-utilization, --max-model-len,
+     --dtype (these are all handled by the node agent now, not the server)
+
+
+2. scripts/start.sh  — NEW FILE
+
+   Single command to launch the whole stack on one machine:
+
+       MODEL=Qwen/Qwen2.5-3B-Instruct bash scripts/start.sh
+
+   It starts the coordinator, node agent, and inference server in the right
+   order, waits for each one to be healthy before moving on, then waits for
+   the model to finish loading. When everything is ready it prints:
+
+       System ready!
+       Test with: curl http://localhost:8080/v1/chat/completions ...
+
+   Logs go to coordinator.log, node_agent.log, server.log in the project root.
+   Ctrl+C shuts down all three services cleanly.
+
+   Configurable via env vars:
+       MODEL              (default: Qwen/Qwen2.5-3B-Instruct)
+       COORD_PORT         (default: 8000)
+       NODE_PORT          (default: 9000)
+       SERVER_PORT        (default: 8080)
+       VLLM_PORT          (default: 8100)
+       STARTUP_TIMEOUT    seconds to wait for model load (default: 600)
+
+
+3. scripts/test.sh  — NEW FILE
+
+   Quick smoke test once the stack is running:
+
+       bash scripts/test.sh              # non-streaming
+       STREAM=1 bash scripts/test.sh     # streaming
+       PROMPT="What is 2+2?" bash scripts/test.sh
+
+   Prints the full JSON response and then just the assistant's message.
+   Uses Python stdlib only so no venv activation needed.
+
+
+WHAT WASN'T CHANGED
+--------------------
+- coordinator.py      — untouched
+- node_agent.py       — untouched
+- requirements.txt    — untouched
+- Dockerfiles         — untouched
+
+
+HOW TO RUN IT
+-------------
+   cd axon-main
+   MODEL=Qwen/Qwen2.5-3B-Instruct bash scripts/start.sh
+
+   # In another terminal, once you see "System ready!":
+   bash scripts/test.sh

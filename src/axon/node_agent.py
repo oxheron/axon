@@ -2,7 +2,9 @@ import argparse
 import asyncio
 import logging
 import os
+import re
 import socket
+import subprocess
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -54,6 +56,29 @@ class NodeRuntimeState:
     vllm_proc: Optional[asyncio.subprocess.Process] = None
     ray_joined: bool = False
     vram_gb: float = 0.0
+    vllm_launch_error: Optional[str] = None
+
+
+def _detect_vram_gb_rocm_smi() -> float:
+    """VRAM for AMD GPUs via rocm-smi (no NVIDIA NVML; complements ROCm PyTorch)."""
+    try:
+        proc = subprocess.run(
+            ["rocm-smi", "--showmeminfo", "vram", "-d", "0"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return 0.0
+    text = (proc.stdout or "") + (proc.stderr or "")
+    m = re.search(r"VRAM Total Memory \(MiB\):\s*([0-9]+)", text)
+    if m:
+        return float(m.group(1)) / 1024.0
+    m = re.search(r"VRAM Total Memory \(B\):\s*([0-9]+)", text)
+    if m:
+        return float(m.group(1)) / (1024**3)
+    return 0.0
 
 
 def detect_vram_gb() -> float:
@@ -76,7 +101,67 @@ def detect_vram_gb() -> float:
     except Exception:  # noqa: BLE001
         pass
 
+    rocm_gb = _detect_vram_gb_rocm_smi()
+    if rocm_gb > 0.0:
+        return rocm_gb
+
     return 0.0
+
+
+def detect_torch_accelerator() -> str:
+    """How PyTorch was built: 'rocm' (HIP), 'cuda', or 'none'."""
+    try:
+        import torch
+    except ImportError:
+        return "none"
+    # ROCm PyTorch still exposes many CUDA-like APIs; check HIP first.
+    if getattr(torch.version, "hip", None):
+        return "rocm"
+    try:
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:  # noqa: BLE001
+        pass
+    return "none"
+
+
+def _preflight_vllm_for_accelerator(accel: str) -> None:
+    """
+    Fail fast with actionable logs when the vLLM install cannot match the PyTorch stack.
+
+    Common pitfall: `pip install vllm` pulls a CUDA wheel; on AMD + ROCm PyTorch that
+    yields missing `libcudart.so.*` and `UnspecifiedPlatform` / device inference errors.
+    """
+    if accel != "rocm":
+        return
+    try:
+        import vllm._rocm_C  # noqa: F401, PLC0415
+    except Exception as exc:  # noqa: BLE001 - ImportError/OSError if wrong wheel or missing ROCm libs.
+        LOGGER.error(
+            "ROCm PyTorch is active, but this vLLM build does not load `vllm._rocm_C` (%s). "
+            "Install a ROCm-matched vLLM wheel (see README AMD section / vLLM ROCm docs); "
+            "the default PyPI CUDA vLLM wheel will not run on this host.",
+            exc,
+        )
+        return
+    try:
+        import amdsmi  # noqa: F401, PLC0415
+    except ImportError:
+        LOGGER.warning(
+            "ROCm detected but Python package `amdsmi` is not installed; "
+            "vLLM may not auto-detect the ROCm platform. "
+            "Consider: pip install amdsmi",
+        )
+
+
+def build_vllm_worker_environ(accel: str) -> dict[str, str]:
+    """Environment for the vLLM child process (inherit parent + device hints)."""
+    env = os.environ.copy()
+    if accel == "rocm":
+        env.setdefault("VLLM_TARGET_DEVICE", "rocm")
+    elif accel == "cuda":
+        env.setdefault("VLLM_TARGET_DEVICE", "cuda")
+    return env
 
 
 def detect_local_ip() -> str:
@@ -115,6 +200,19 @@ async def join_ray_cluster(ray_head_address: str) -> None:
         LOGGER.info("Ray join completed successfully.")
 
 
+async def _pipe_subprocess_output(stream: asyncio.StreamReader, prefix: str) -> None:
+    try:
+        while True:
+            line = await stream.readline()
+            if not line:
+                break
+            LOGGER.info("%s %s", prefix, line.decode(errors="replace").rstrip())
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001
+        LOGGER.exception("%s log reader failed", prefix)
+
+
 async def start_vllm_worker_process(
     model_name: str,
     pipeline_parallel_size: int,
@@ -122,6 +220,8 @@ async def start_vllm_worker_process(
     gpu_memory_utilization: float,
     max_model_len: int,
     dtype: str,
+    distributed_backend: str = "ray",
+    env: Optional[dict[str, str]] = None,
 ) -> asyncio.subprocess.Process:
     cmd = [
         sys.executable,
@@ -138,17 +238,24 @@ async def start_vllm_worker_process(
         "--pipeline-parallel-size",
         str(pipeline_parallel_size),
         "--distributed-executor-backend",
-        "ray",
+        distributed_backend,
         "--gpu-memory-utilization",
         str(gpu_memory_utilization),
         "--max-model-len",
         str(max_model_len),
         "--dtype",
         dtype,
-        "--disable-log-requests",
     ]
     LOGGER.info("Starting local vLLM worker API: %s", " ".join(cmd))
-    return await asyncio.create_subprocess_exec(*cmd)
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        env=env if env is not None else os.environ,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    if proc.stdout is not None:
+        asyncio.create_task(_pipe_subprocess_output(proc.stdout, "[vllm]"))
+    return proc
 
 
 def create_app(state: NodeRuntimeState) -> FastAPI:
@@ -192,6 +299,7 @@ def create_app(state: NodeRuntimeState) -> FastAPI:
             if state.startup_config
             else None,
             "vllm_pid": state.vllm_proc.pid if state.vllm_proc else None,
+            "vllm_launch_error": state.vllm_launch_error,
         }
 
     return app
@@ -233,10 +341,40 @@ async def handle_cluster_start(state: NodeRuntimeState) -> None:
         cfg.ray_head_address,
     )
 
-    await join_ray_cluster(cfg.ray_head_address)
-    state.ray_joined = True
+    if cfg.pipeline_parallel_size == 1:
+        LOGGER.info("Single-node mode: skipping Ray cluster join, using mp backend.")
+    else:
+        await join_ray_cluster(cfg.ray_head_address)
+        state.ray_joined = True
 
     if state.launch_vllm_worker:
+        backend = "mp" if cfg.pipeline_parallel_size == 1 else "ray"
+        probe_timeout = float(os.environ.get("AXON_TORCH_ACCEL_PROBE_TIMEOUT", "180"))
+        LOGGER.info(
+            "Probing PyTorch accelerator (timeout %.0fs). "
+            "First HIP/CUDA driver init can be slow; this runs off the request loop.",
+            probe_timeout,
+        )
+        try:
+            accel = await asyncio.wait_for(
+                asyncio.to_thread(detect_torch_accelerator),
+                timeout=probe_timeout,
+            )
+        except asyncio.TimeoutError:
+            state.vllm_launch_error = (
+                f"torch_accelerator_probe_timeout_{int(probe_timeout)}s"
+            )
+            LOGGER.error(
+                "Torch accelerator probe timed out after %.0fs. "
+                "Common causes: wrong PyTorch build for your GPU (CUDA vs ROCm), "
+                "stuck GPU driver, or blocked device access. "
+                "Fix the stack, then retry. Env AXON_TORCH_ACCEL_PROBE_TIMEOUT raises this limit.",
+                probe_timeout,
+            )
+            return
+        LOGGER.info("PyTorch accelerator for vLLM subprocess: %s", accel)
+        await asyncio.to_thread(_preflight_vllm_for_accelerator, accel)
+        vllm_env = build_vllm_worker_environ(accel)
         state.vllm_proc = await start_vllm_worker_process(
             model_name=cfg.model_name,
             pipeline_parallel_size=cfg.pipeline_parallel_size,
@@ -244,6 +382,8 @@ async def handle_cluster_start(state: NodeRuntimeState) -> None:
             gpu_memory_utilization=state.vllm_gpu_memory_utilization,
             max_model_len=state.vllm_max_model_len,
             dtype=state.vllm_dtype,
+            distributed_backend=backend,
+            env=vllm_env,
         )
         LOGGER.info("vLLM worker started with pid=%s", state.vllm_proc.pid)
 
