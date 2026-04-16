@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s [node-agent] %(message)s",
+    format="%(asctime)s %(levelname)s [node] %(message)s",
 )
 LOGGER = logging.getLogger(__name__)
 
@@ -35,6 +35,7 @@ class NodeRegistration(BaseModel):
     port: int
     vram_gb: float
     callback_url: str
+    worker_url: str
 
 
 @dataclass
@@ -60,7 +61,6 @@ class NodeRuntimeState:
 
 
 def _detect_vram_gb_rocm_smi() -> float:
-    """VRAM for AMD GPUs via rocm-smi (no NVIDIA NVML; complements ROCm PyTorch)."""
     try:
         proc = subprocess.run(
             ["rocm-smi", "--showmeminfo", "vram", "-d", "0"],
@@ -72,12 +72,12 @@ def _detect_vram_gb_rocm_smi() -> float:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return 0.0
     text = (proc.stdout or "") + (proc.stderr or "")
-    m = re.search(r"VRAM Total Memory \(MiB\):\s*([0-9]+)", text)
-    if m:
-        return float(m.group(1)) / 1024.0
-    m = re.search(r"VRAM Total Memory \(B\):\s*([0-9]+)", text)
-    if m:
-        return float(m.group(1)) / (1024**3)
+    match = re.search(r"VRAM Total Memory \(MiB\):\s*([0-9]+)", text)
+    if match:
+        return float(match.group(1)) / 1024.0
+    match = re.search(r"VRAM Total Memory \(B\):\s*([0-9]+)", text)
+    if match:
+        return float(match.group(1)) / (1024**3)
     return 0.0
 
 
@@ -89,7 +89,7 @@ def detect_vram_gb() -> float:
         handle = pynvml.nvmlDeviceGetHandleByIndex(0)
         mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
         return mem_info.total / (1024**3)
-    except Exception:  # noqa: BLE001 - fallback path below.
+    except Exception:  # noqa: BLE001
         pass
 
     try:
@@ -104,17 +104,14 @@ def detect_vram_gb() -> float:
     rocm_gb = _detect_vram_gb_rocm_smi()
     if rocm_gb > 0.0:
         return rocm_gb
-
     return 0.0
 
 
 def detect_torch_accelerator() -> str:
-    """How PyTorch was built: 'rocm' (HIP), 'cuda', or 'none'."""
     try:
         import torch
     except ImportError:
         return "none"
-    # ROCm PyTorch still exposes many CUDA-like APIs; check HIP first.
     if getattr(torch.version, "hip", None):
         return "rocm"
     try:
@@ -126,21 +123,14 @@ def detect_torch_accelerator() -> str:
 
 
 def _preflight_vllm_for_accelerator(accel: str) -> None:
-    """
-    Fail fast with actionable logs when the vLLM install cannot match the PyTorch stack.
-
-    Common pitfall: `pip install vllm` pulls a CUDA wheel; on AMD + ROCm PyTorch that
-    yields missing `libcudart.so.*` and `UnspecifiedPlatform` / device inference errors.
-    """
     if accel != "rocm":
         return
     try:
         import vllm._rocm_C  # noqa: F401, PLC0415
-    except Exception as exc:  # noqa: BLE001 - ImportError/OSError if wrong wheel or missing ROCm libs.
+    except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "ROCm PyTorch is active, but this vLLM build does not load `vllm._rocm_C` (%s). "
-            "Install a ROCm-matched vLLM wheel (see README AMD section / vLLM ROCm docs); "
-            "the default PyPI CUDA vLLM wheel will not run on this host.",
+            "Install a ROCm-matched vLLM build; the default PyPI CUDA wheel will not run on this host.",
             exc,
         )
         return
@@ -149,13 +139,11 @@ def _preflight_vllm_for_accelerator(accel: str) -> None:
     except ImportError:
         LOGGER.warning(
             "ROCm detected but Python package `amdsmi` is not installed; "
-            "vLLM may not auto-detect the ROCm platform. "
-            "Consider: pip install amdsmi",
+            "vLLM may not auto-detect the ROCm platform."
         )
 
 
 def build_vllm_worker_environ(accel: str) -> dict[str, str]:
-    """Environment for the vLLM child process (inherit parent + device hints)."""
     env = os.environ.copy()
     if accel == "rocm":
         env.setdefault("VLLM_TARGET_DEVICE", "rocm")
@@ -194,7 +182,6 @@ async def join_ray_cluster(ray_head_address: str) -> None:
     stdout, stderr = await proc.communicate()
     if proc.returncode != 0:
         combined = (stderr or stdout).decode().strip()
-        # If a Ray runtime is already active this may fail but the node can still be usable.
         LOGGER.warning("Ray join returned %s: %s", proc.returncode, combined)
     else:
         LOGGER.info("Ray join completed successfully.")
@@ -259,7 +246,7 @@ async def start_vllm_worker_process(
 
 
 def create_app(state: NodeRuntimeState) -> FastAPI:
-    app = FastAPI(title="Axon Node Agent", version="0.1.0")
+    app = FastAPI(title="Axon Node Service", version="0.1.0")
 
     @app.on_event("startup")
     async def startup_event() -> None:
@@ -273,6 +260,7 @@ def create_app(state: NodeRuntimeState) -> FastAPI:
             "ok": True,
             "node_id": state.node_id,
             "registered_vram_gb": state.vram_gb,
+            "worker_url": f"http://{state.advertise_host}:{state.vllm_worker_port}",
             "ray_joined": state.ray_joined,
             "startup_received": state.startup_config is not None,
             "vllm_worker_running": state.vllm_proc is not None
@@ -294,6 +282,7 @@ def create_app(state: NodeRuntimeState) -> FastAPI:
         return {
             "node_id": state.node_id,
             "vram_gb": state.vram_gb,
+            "worker_url": f"http://{state.advertise_host}:{state.vllm_worker_port}",
             "ray_joined": state.ray_joined,
             "startup_config": state.startup_config.model_dump()
             if state.startup_config
@@ -312,20 +301,21 @@ async def register_loop(state: NodeRuntimeState) -> None:
         port=state.bind_port,
         vram_gb=state.vram_gb,
         callback_url=f"http://{state.advertise_host}:{state.bind_port}",
+        worker_url=f"http://{state.advertise_host}:{state.vllm_worker_port}",
     )
     endpoint = f"{state.coordinator_url}/register"
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         while True:
             try:
-                resp = await client.post(endpoint, json=payload.model_dump())
-                if resp.status_code == 409:
+                response = await client.post(endpoint, json=payload.model_dump())
+                if response.status_code == 409:
                     LOGGER.error("Registration rejected: cluster already started.")
                     return
-                resp.raise_for_status()
+                response.raise_for_status()
                 LOGGER.info("Registered successfully with coordinator.")
                 return
-            except Exception as exc:  # noqa: BLE001 - loop until coordinator is ready.
+            except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("Registration failed (%s), retrying...", exc)
                 await asyncio.sleep(2)
 
@@ -333,22 +323,22 @@ async def register_loop(state: NodeRuntimeState) -> None:
 async def handle_cluster_start(state: NodeRuntimeState) -> None:
     await state.startup_event.wait()
     assert state.startup_config is not None
-    cfg = state.startup_config
+    config = state.startup_config
     LOGGER.info(
         "Received startup signal: model=%s pipeline_parallel_size=%s ray=%s",
-        cfg.model_name,
-        cfg.pipeline_parallel_size,
-        cfg.ray_head_address,
+        config.model_name,
+        config.pipeline_parallel_size,
+        config.ray_head_address,
     )
 
-    if cfg.pipeline_parallel_size == 1:
+    if config.pipeline_parallel_size == 1:
         LOGGER.info("Single-node mode: skipping Ray cluster join, using mp backend.")
     else:
-        await join_ray_cluster(cfg.ray_head_address)
+        await join_ray_cluster(config.ray_head_address)
         state.ray_joined = True
 
     if state.launch_vllm_worker:
-        backend = "mp" if cfg.pipeline_parallel_size == 1 else "ray"
+        backend = "mp" if config.pipeline_parallel_size == 1 else "ray"
         probe_timeout = float(os.environ.get("AXON_TORCH_ACCEL_PROBE_TIMEOUT", "180"))
         LOGGER.info(
             "Probing PyTorch accelerator (timeout %.0fs). "
@@ -366,9 +356,7 @@ async def handle_cluster_start(state: NodeRuntimeState) -> None:
             )
             LOGGER.error(
                 "Torch accelerator probe timed out after %.0fs. "
-                "Common causes: wrong PyTorch build for your GPU (CUDA vs ROCm), "
-                "stuck GPU driver, or blocked device access. "
-                "Fix the stack, then retry. Env AXON_TORCH_ACCEL_PROBE_TIMEOUT raises this limit.",
+                "Fix the GPU stack, then retry.",
                 probe_timeout,
             )
             return
@@ -376,8 +364,8 @@ async def handle_cluster_start(state: NodeRuntimeState) -> None:
         await asyncio.to_thread(_preflight_vllm_for_accelerator, accel)
         vllm_env = build_vllm_worker_environ(accel)
         state.vllm_proc = await start_vllm_worker_process(
-            model_name=cfg.model_name,
-            pipeline_parallel_size=cfg.pipeline_parallel_size,
+            model_name=config.model_name,
+            pipeline_parallel_size=config.pipeline_parallel_size,
             port=state.vllm_worker_port,
             gpu_memory_utilization=state.vllm_gpu_memory_utilization,
             max_model_len=state.vllm_max_model_len,
@@ -389,15 +377,15 @@ async def handle_cluster_start(state: NodeRuntimeState) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Axon node agent")
+    parser = argparse.ArgumentParser(description="Axon node service")
     parser.add_argument(
         "--coordinator-url",
         default=os.environ.get("COORDINATOR_URL"),
         required=os.environ.get("COORDINATOR_URL") is None,
         help="Coordinator base URL, e.g. http://10.0.0.10:8000",
     )
-    parser.add_argument("--host", default="0.0.0.0", help="Node agent bind host")
-    parser.add_argument("--port", type=int, default=9000, help="Node agent bind port")
+    parser.add_argument("--host", default="0.0.0.0", help="Node service bind host")
+    parser.add_argument("--port", type=int, default=9000, help="Node service bind port")
     parser.add_argument(
         "--advertise-host",
         default=os.environ.get("ADVERTISE_HOST") or detect_local_ip(),

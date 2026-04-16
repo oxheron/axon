@@ -2,9 +2,9 @@
 
 This repo provides a minimal three-service setup for static, pipeline-parallel inference across multiple machines:
 
-- `src/axon/coordinator.py`: node registration + startup broadcast
-- `src/axon/node_agent.py`: node VRAM detection + Ray join + optional local vLLM worker launch
-- `src/axon/server.py`: OpenAI-compatible `/v1/chat/completions` API on coordinator
+- `coordinator/src/`: Go coordinator for node registration, startup broadcast, and prompt routing
+- `node/src/`: Python node service for VRAM detection, Ray join, and local vLLM worker launch
+- `user/src/`: Python OpenAI-compatible `/v1/chat/completions` API that talks to the coordinator
 
 Docker assets:
 
@@ -122,7 +122,8 @@ Use `--no-cache-dir` for large wheels so pip does not try to cache multi‑gigab
 ## 1) Start Coordinator (on head node)
 
 ```bash
-PYTHONPATH=src python -m axon.coordinator \
+cd coordinator
+go run ./src \
   --host 0.0.0.0 \
   --port 8000 \
   --model-name Qwen/Qwen2.5-3B-Instruct \
@@ -136,10 +137,10 @@ Useful endpoints:
 - `GET /config` (available after startup)
 - `POST /register` (used by node agents)
 
-## 2) Start Node Agent (on each worker node)
+## 2) Start Node Service (on each worker node)
 
 ```bash
-PYTHONPATH=src python -m axon.node_agent \
+python node/src/agent.py \
   --coordinator-url http://<COORDINATOR_IP>:8000 \
   --host 0.0.0.0 \
   --port 9000 \
@@ -156,17 +157,16 @@ When enough nodes register, the coordinator broadcasts `/startup`. The node then
 
 If you only want Ray join (and no local vLLM API on workers), pass `--no-vllm-worker`.
 
-## 3) Start Inference Server (on coordinator node)
+## 3) Start User Service (on coordinator node)
 
 ```bash
-PYTHONPATH=src python -m axon.server \
+python user/src/server.py \
   --coordinator-url http://127.0.0.1:8000 \
-  --vllm-worker-url http://127.0.0.1:8100 \
   --host 0.0.0.0 \
   --port 8080
 ```
 
-The server waits until the coordinator reports the pipeline is ready, then proxies OpenAI-compatible traffic to the vLLM worker URL above.
+The user service waits until the coordinator reports the pipeline is ready, then proxies OpenAI-compatible traffic to the coordinator. The coordinator selects a node and forwards the same request to that node's vLLM worker.
 
 ## Test Inference
 

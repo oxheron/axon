@@ -4,12 +4,14 @@ FROM ${VLLM_BASE_IMAGE}
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app/src
+ENV PYTHONPATH=/app/node/src
 
-RUN pip install --no-cache-dir fastapi "uvicorn[standard]" httpx pydantic ray pynvml
+COPY requirements-base.txt /app/requirements-base.txt
+COPY node/requirements.txt /app/node/requirements.txt
+RUN pip install --no-cache-dir -r /app/node/requirements.txt
 
-COPY src /app/src
+COPY node/src /app/node/src
 
 EXPOSE 9000
 
-ENTRYPOINT ["python", "-m", "axon.node_agent"]
+ENTRYPOINT ["python", "/app/node/src/agent.py"]

@@ -1,15 +1,19 @@
-ARG VLLM_BASE_IMAGE=vllm/vllm-openai:latest
-FROM ${VLLM_BASE_IMAGE}
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /src
+
+COPY coordinator/go.mod ./coordinator/go.mod
+COPY coordinator/src ./coordinator/src
+
+WORKDIR /src/coordinator
+RUN go build -o /out/axon-coordinator ./src
+
+FROM alpine:3.20
 
 WORKDIR /app
 
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app/src
-
-RUN pip install --no-cache-dir fastapi "uvicorn[standard]" httpx pydantic ray pynvml
-
-COPY src /app/src
+COPY --from=builder /out/axon-coordinator /usr/local/bin/axon-coordinator
 
 EXPOSE 8000
 
-ENTRYPOINT ["python", "-m", "axon.coordinator"]
+ENTRYPOINT ["axon-coordinator"]

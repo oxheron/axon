@@ -1,4 +1,4 @@
-# Shared Python dependencies for Axon (coordinator, node agent, inference server).
+# Shared Python dependencies for Axon's Python services (node and user).
 # NVIDIA: use requirements.txt (adds vLLM + torch on top of this file).
 # AMD / ROCm: use requirements-amd.txt after the official ROCm vLLM wheel (bundles PyTorch); see that file.
 fastapi

@@ -176,25 +176,23 @@ docker run -d \
   --min-nodes 1 \
   --model-name "$MODEL" \
   --ray-port 6379 \
-  --ray-head-address "${COORD_CONTAINER}:6379" \
-  --autostart-ray-head >/dev/null
+  --ray-head-address "${COORD_CONTAINER}:6379" >/dev/null
 
-echo "Starting node agent..."
+echo "Starting node service..."
 docker run -d \
   --name "$NODE_CONTAINER" \
   --network "$NETWORK_NAME" \
+  "${DOCKER_SERVER_GPU_FLAGS[@]}" \
   "$NODE_IMAGE" \
   --coordinator-url "http://${COORD_CONTAINER}:8000" \
   --host 0.0.0.0 \
   --port 9000 \
-  --advertise-host "$NODE_CONTAINER" \
-  --no-vllm-worker >/dev/null
+  --advertise-host "$NODE_CONTAINER" >/dev/null
 
-echo "Starting inference server..."
+echo "Starting user service..."
 docker run -d \
   --name "$SERVER_CONTAINER" \
   --network "$NETWORK_NAME" \
-  "${DOCKER_SERVER_GPU_FLAGS[@]}" \
   -p "${SERVER_PORT}:8080" \
   "$SERVER_IMAGE" \
   --coordinator-url "http://${COORD_CONTAINER}:8000" \
