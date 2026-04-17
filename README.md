@@ -2,7 +2,9 @@
 
 This repo provides a minimal three-service setup for static, pipeline-parallel inference across multiple machines:
 
-- `coordinator/src/`: Go coordinator for node registration, startup broadcast, and prompt routing
+- `coordinator/src/`: Go `main` entrypoint for the coordinator binary
+- `coordinator/internal/server/`: coordinator HTTP API and orchestration logic
+- `coordinator/test/`: Go unit tests (`go test ./...` from `coordinator/`)
 - `node/src/`: Python node service for VRAM detection, Ray join, and local vLLM worker launch
 - `user/src/`: Python OpenAI-compatible `/v1/chat/completions` API that talks to the coordinator
 
@@ -131,6 +133,16 @@ go run ./src \
   --autostart-ray-head
 ```
 
+Optional Phase Two controls:
+
+- `--execution-mode dry_run` validates the load plan and topology without
+  launching executable backend workers
+- `--execution-mode slice_loaded_pipeline` preserves coordinator-assigned slice
+  semantics while passing backend launch details through the same startup
+  contract
+- Repeat `--backend-launch-arg ...` or `--backend-env KEY=VALUE` to inject
+  backend-specific worker flags without changing the public protocol
+
 Useful endpoints:
 
 - `GET /status`
@@ -150,10 +162,18 @@ python node/src/agent.py \
   --vllm-dtype float16
 ```
 
-When enough nodes register, the coordinator broadcasts `/startup`. The node then:
+When enough nodes register, the coordinator broadcasts a slice-aware `/startup`
+load plan. The node then:
 
-1. Joins Ray cluster at coordinator-provided head address
-2. Starts a local vLLM process using the coordinator's `pipeline_parallel_size`
+1. Receives `cluster_id`, `execution_mode`, the ordered topology, and a
+   per-node `assignment`
+2. Joins Ray cluster at the coordinator-provided head address when the plan
+   requires a multi-node backend
+3. Starts a local vLLM process using the planned stage count plus any backend
+   env/CLI overrides
+4. Reports lifecycle updates such as `assigned`, `load_started`,
+   `backend_joined`, `slice_loaded`, and `pipeline_ready` back to the
+   coordinator
 
 If you only want Ray join (and no local vLLM API on workers), pass `--no-vllm-worker`.
 
@@ -166,7 +186,10 @@ python user/src/server.py \
   --port 8080
 ```
 
-The user service waits until the coordinator reports the pipeline is ready, then proxies OpenAI-compatible traffic to the coordinator. The coordinator selects a node and forwards the same request to that node's vLLM worker.
+The user service waits until the coordinator reports the pipeline is ready, then
+proxies OpenAI-compatible traffic to the coordinator. The coordinator forwards
+the same request to the configured entry node's vLLM worker instead of always
+assuming "first registered node wins".
 
 ## Test Inference
 
@@ -214,6 +237,39 @@ docker build -f docker/server.Dockerfile --build-arg "VLLM_BASE_IMAGE=${ROCM_BAS
 
 Run containers on AMD with GPU access per [vLLM ROCm instructions](https://docs.vllm.ai/en/stable/deployment/docker.html) (for example `--device /dev/kfd`, `--device /dev/dri`, `--group-add video`, `--ipc host`).
 
+## Local Two-Node Harness
+
+For a reproducible Phase Two control-plane run, use the compose-based two-node
+harness:
+
+```bash
+bash scripts/two_node_compose.sh
+```
+
+You need either the **Docker Compose V2 plugin** (`docker compose version` works)
+or standalone **`docker-compose`** on `PATH`. Plain `docker` without Compose
+cannot run this stack.
+
+The **Docker daemon** must be running and reachable (for example
+`docker info` succeeds). Errors about `/var/run/docker.sock` mean the client
+cannot talk to the daemon; start Docker (`systemctl start docker` on many
+Linux setups) or fix `DOCKER_HOST` for rootless or remote engines.
+
+Defaults:
+
+- brings up `coordinator`, `node-a`, `node-b`, and `user`
+- starts the coordinator with `--min-nodes 2`
+- keeps node registration order deterministic for local entry-node selection
+- defaults to `AXON_EXECUTION_MODE=dry_run` so the full two-node topology can be
+  validated without requiring a working distributed backend on day one
+
+Useful overrides:
+
+- `AXON_EXECUTION_MODE=slice_loaded_pipeline` to exercise the real executable path
+- `AXON_EXECUTION_MODE=vllm_ray_pipeline` to test the current Ray-backed path
+- `KEEP_RUNNING=1` to leave the compose stack up for manual inspection
+- `VLLM_BASE_IMAGE=...` to swap CUDA vs ROCm-compatible images
+
 ## 10-12GB GPU smoke test script
 
 This script is designed for a single machine with a max ~16GB GPU and runs a 10-12GB friendly test profile by default:
@@ -232,3 +288,5 @@ Optional environment variables:
 - `VLLM_BASE_IMAGE` — Docker `FROM` for all three images (defaults by vendor in the script: CUDA vs `vllm-openai-rocm`)
 - `AXON_DOCKER_SERVER_GPU_FLAGS` — override the `docker run` GPU-related flags for the inference container (space-separated)
 - `KEEP_CONTAINERS=1` to keep stack running after the test
+
+for rocm make sure to export HSA Override (dev note)

@@ -4,6 +4,7 @@ WORKDIR /src
 
 COPY coordinator/go.mod ./coordinator/go.mod
 COPY coordinator/src ./coordinator/src
+COPY coordinator/internal ./coordinator/internal
 
 WORKDIR /src/coordinator
 RUN go build -o /out/axon-coordinator ./src

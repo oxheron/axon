@@ -1,0 +1,95 @@
+services:
+  coordinator:
+    build:
+      context: ..
+      dockerfile: docker/coordinator.Dockerfile
+    image: ${COORD_IMAGE:-axon-coordinator:two-node}
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --min-nodes
+      - "2"
+      - --model-name
+      - ${MODEL:-Qwen/Qwen2.5-3B-Instruct}
+      - --execution-mode
+      - ${AXON_EXECUTION_MODE:-dry_run}
+      - --ray-port
+      - "6379"
+      - --ray-head-address
+      - ${AXON_RAY_HEAD_ADDRESS:-coordinator:6379}
+    ports:
+      - ${COORD_PORT:-8000}:8000
+
+  node-a:
+    build:
+      context: ..
+      dockerfile: docker/node-agent.Dockerfile
+      args:
+        VLLM_BASE_IMAGE: ${VLLM_BASE_IMAGE:-vllm/vllm-openai:latest}
+    image: ${NODE_IMAGE:-axon-node-agent:two-node}
+    depends_on:
+      - coordinator
+    command:
+      - --coordinator-url
+      - http://coordinator:8000
+      - --host
+      - 0.0.0.0
+      - --port
+      - "9000"
+      - --node-id
+      - node-a
+      - --advertise-host
+      - node-a
+      - --vllm-worker-port
+      - "8100"
+    ports:
+      - ${NODE_A_PORT:-9000}:9000
+      - ${NODE_A_WORKER_PORT:-8100}:8100
+
+  node-b:
+    build:
+      context: ..
+      dockerfile: docker/node-agent.Dockerfile
+      args:
+        VLLM_BASE_IMAGE: ${VLLM_BASE_IMAGE:-vllm/vllm-openai:latest}
+    image: ${NODE_IMAGE:-axon-node-agent:two-node}
+    depends_on:
+      - coordinator
+      - node-a
+    command:
+      - --coordinator-url
+      - http://coordinator:8000
+      - --host
+      - 0.0.0.0
+      - --port
+      - "9000"
+      - --node-id
+      - node-b
+      - --advertise-host
+      - node-b
+      - --vllm-worker-port
+      - "8100"
+    ports:
+      - ${NODE_B_PORT:-9001}:9000
+      - ${NODE_B_WORKER_PORT:-8101}:8100
+
+  user:
+    build:
+      context: ..
+      dockerfile: docker/server.Dockerfile
+    image: ${SERVER_IMAGE:-axon-server:two-node}
+    depends_on:
+      - coordinator
+      - node-a
+      - node-b
+    command:
+      - --coordinator-url
+      - http://coordinator:8000
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+    ports:
+      - ${SERVER_PORT:-8080}:8080
