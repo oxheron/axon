@@ -1,0 +1,4 @@
+2026/04/21 00:41:40 ray head started successfully
+2026/04/21 00:41:40 starting coordinator on 0.0.0.0:8000
+2026/04/21 00:41:45 startup signal delivered to node=node-a cluster=cluster-1776757305560773288 stage=0/2 (http://127.0.0.1:9000/startup)
+2026/04/21 00:41:45 startup signal delivered to node=node-b cluster=cluster-1776757305560773288 stage=1/2 (http://127.0.0.1:9001/startup)

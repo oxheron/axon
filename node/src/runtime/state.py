@@ -14,6 +14,7 @@ class NodeRuntimeState:
     bind_host: str
     bind_port: int
     advertise_host: str
+    advertise_port: int
     vllm_worker_port: int
     launch_vllm_worker: bool
     vllm_gpu_memory_utilization: float

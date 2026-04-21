@@ -36,6 +36,12 @@ def parse_args() -> argparse.Namespace:
         help="Reachable host/IP advertised to coordinator callbacks",
     )
     parser.add_argument(
+        "--advertise-port",
+        type=int,
+        default=None,
+        help="Reachable port advertised to coordinator callbacks (defaults to --port)",
+    )
+    parser.add_argument(
         "--node-id",
         default=f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}",
         help="Unique node ID for registration",
@@ -79,6 +85,7 @@ def main() -> None:
         bind_host=args.host,
         bind_port=args.port,
         advertise_host=args.advertise_host,
+        advertise_port=args.advertise_port if args.advertise_port is not None else args.port,
         vllm_worker_port=args.vllm_worker_port,
         launch_vllm_worker=not args.no_vllm_worker,
         vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,

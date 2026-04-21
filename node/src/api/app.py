@@ -25,6 +25,23 @@ def create_app(state: NodeRuntimeState) -> FastAPI:
         LOGGER.info("Detected VRAM: %.2f GiB", state.vram_gb)
         asyncio.create_task(register_loop(state))
 
+    @app.on_event("shutdown")
+    async def shutdown_event() -> None:
+        if state.launch_task is not None and not state.launch_task.done():
+            state.launch_task.cancel()
+            try:
+                await state.launch_task
+            except asyncio.CancelledError:
+                pass
+        if state.vllm_proc is not None and state.vllm_proc.returncode is None:
+            LOGGER.info("Terminating vLLM worker pid=%s", state.vllm_proc.pid)
+            state.vllm_proc.terminate()
+            try:
+                await asyncio.wait_for(state.vllm_proc.wait(), timeout=10.0)
+            except asyncio.TimeoutError:
+                LOGGER.warning("vLLM worker did not exit cleanly; killing")
+                state.vllm_proc.kill()
+
     @app.get("/healthz")
     async def healthz() -> dict:
         return {

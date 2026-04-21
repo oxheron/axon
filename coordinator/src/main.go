@@ -26,15 +26,22 @@ func detectLocalIP() string {
 	return localAddr.IP.String()
 }
 
-func maybeStartRayHead(enabled bool, port int) {
+func maybeStartRayHead(enabled bool, port int, nodeIP string) {
 	if !enabled {
 		return
 	}
 
-	cmd := exec.Command("ray", "start", "--head", "--port", fmt.Sprintf("%d", port), "--disable-usage-stats")
+	// Stop any stale Ray session so the new head starts with a clean GCS.
+	exec.Command("ray", "stop", "--force").Run() //nolint:errcheck
+
+	cmd := exec.Command("ray", "start", "--head",
+		"--port", fmt.Sprintf("%d", port),
+		"--node-ip-address", nodeIP,
+		"--disable-usage-stats",
+	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("ray head start exited with error (this may be expected if already running): %v: %s", err, string(output))
+		log.Printf("ray start --head failed: %v\n%s", err, string(output))
 		return
 	}
 	log.Printf("ray head started successfully")
@@ -49,6 +56,7 @@ func main() {
 	rayPort := flag.Int("ray-port", 6379, "Ray GCS port for head node")
 	rayHeadAddress := flag.String("ray-head-address", "", "Ray head address host:port. If omitted, inferred from local IP + --ray-port")
 	autostartRayHead := flag.Bool("autostart-ray-head", false, "Start `ray start --head` before serving HTTP API")
+	rayNodeIP := flag.String("ray-node-ip", "", "IP address Ray head binds to (--node-ip-address). Defaults to detectLocalIP()")
 	var backendLaunchArgs server.StringArrayFlag
 	var backendEnv server.KeyValueFlag
 	flag.Var(&backendLaunchArgs, "backend-launch-arg", "Repeatable backend launch argument appended to node worker startup.")
@@ -68,7 +76,11 @@ func main() {
 		os.Exit(2)
 	}
 
-	maybeStartRayHead(*autostartRayHead, *rayPort)
+	resolvedRayNodeIP := *rayNodeIP
+	if resolvedRayNodeIP == "" {
+		resolvedRayNodeIP = detectLocalIP()
+	}
+	maybeStartRayHead(*autostartRayHead, *rayPort, resolvedRayNodeIP)
 
 	resolvedRayHead := *rayHeadAddress
 	if resolvedRayHead == "" {

@@ -71,9 +71,9 @@ async def register_loop(state: NodeRuntimeState) -> None:
     payload = NodeRegistration(
         node_id=state.node_id,
         host=state.advertise_host,
-        port=state.bind_port,
+        port=state.advertise_port,
         vram_gb=state.vram_gb,
-        callback_url=f"http://{state.advertise_host}:{state.bind_port}",
+        callback_url=f"http://{state.advertise_host}:{state.advertise_port}",
         worker_url=state.worker_url(),
     )
     endpoint = f"{state.coordinator_url}/register"
@@ -83,7 +83,11 @@ async def register_loop(state: NodeRuntimeState) -> None:
             try:
                 response = await client.post(endpoint, json=payload.model_dump())
                 if response.status_code == 409:
-                    LOGGER.error("Registration rejected: cluster already started.")
+                    LOGGER.error(
+                        "Registration rejected: coordinator already triggered cluster "
+                        "startup (409). Another node registered first, or this coordinator "
+                        "is a stale instance — stop old coordinators on this URL and retry."
+                    )
                     return
                 response.raise_for_status()
                 LOGGER.info("Registered successfully with coordinator.")

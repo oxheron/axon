@@ -239,36 +239,33 @@ Run containers on AMD with GPU access per [vLLM ROCm instructions](https://docs.
 
 ## Local Two-Node Harness
 
-For a reproducible Phase Two control-plane run, use the compose-based two-node
-harness:
+For a **no-Docker** two-node run (same style as `scripts/start.sh`: `go run` the
+coordinator, `python3` for two node agents and the user service, no image
+builds):
+
+```bash
+bash scripts/two_node_start.sh
+```
+
+Defaults:
+
+- coordinator with `--min-nodes 2` and `AXON_EXECUTION_MODE=dry_run`
+- `node-a` then `node-b` so entry-node order matches the compose harness
+- readiness is judged from **coordinator `/status`** (in `dry_run`, user
+  `/healthz` can stay “not ok” because inference is intentionally off)
+
+Useful overrides:
+
+- `AXON_EXECUTION_MODE=slice_loaded_pipeline` or `vllm_ray_pipeline` for executable paths
+- `AUTOSTART_RAY_HEAD=1` on the coordinator when testing Ray-backed modes locally
+- `NODE_A_PORT`, `NODE_B_PORT`, `VLLM_A_PORT`, `VLLM_B_PORT`, `COORD_PORT`, `SERVER_PORT`
+
+**Optional — same topology in containers** (needs Docker + Compose, builds
+images with `docker build` then `compose up`; see script header):
 
 ```bash
 bash scripts/two_node_compose.sh
 ```
-
-You need either the **Docker Compose V2 plugin** (`docker compose version` works)
-or standalone **`docker-compose`** on `PATH`. Plain `docker` without Compose
-cannot run this stack.
-
-The **Docker daemon** must be running and reachable (for example
-`docker info` succeeds). Errors about `/var/run/docker.sock` mean the client
-cannot talk to the daemon; start Docker (`systemctl start docker` on many
-Linux setups) or fix `DOCKER_HOST` for rootless or remote engines.
-
-Defaults:
-
-- brings up `coordinator`, `node-a`, `node-b`, and `user`
-- starts the coordinator with `--min-nodes 2`
-- keeps node registration order deterministic for local entry-node selection
-- defaults to `AXON_EXECUTION_MODE=dry_run` so the full two-node topology can be
-  validated without requiring a working distributed backend on day one
-
-Useful overrides:
-
-- `AXON_EXECUTION_MODE=slice_loaded_pipeline` to exercise the real executable path
-- `AXON_EXECUTION_MODE=vllm_ray_pipeline` to test the current Ray-backed path
-- `KEEP_RUNNING=1` to leave the compose stack up for manual inspection
-- `VLLM_BASE_IMAGE=...` to swap CUDA vs ROCm-compatible images
 
 ## 10-12GB GPU smoke test script
 
