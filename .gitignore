@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+.pycache/
+*.py[cod]
+*.pyo
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+*.dist-info/
+
+# Go
+coordinator/coordinator
+coordinator/bin/
+*.exe
+*.test
+*.out
