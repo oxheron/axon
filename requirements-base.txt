@@ -11,3 +11,4 @@ ray
 transformers>=4.51.1,<4.54.0
 pynvml
 # pynvml: NVIDIA only; harmless on AMD. VRAM falls back to PyTorch and/or rocm-smi in the node agent.
+websockets>=11

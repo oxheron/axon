@@ -5,12 +5,11 @@ import logging
 
 from fastapi import FastAPI
 
-from coordinator.client import register_loop, report_node_status
+from coordinator.client import register_loop
+from coordinator.ws_client import ws_session_loop
 from hardware import detect_vram_gb
-from runtime.lifecycle import handle_cluster_start
+from runtime.lifecycle import apply_startup_config
 from runtime.state import NodeRuntimeState
-from runtime.strategy import resolve_launch_strategy
-from topology.assignment import resolve_assignment
 from topology.models import StartupConfig
 
 LOGGER = logging.getLogger(__name__)
@@ -24,6 +23,7 @@ def create_app(state: NodeRuntimeState) -> FastAPI:
         state.vram_gb = detect_vram_gb()
         LOGGER.info("Detected VRAM: %.2f GiB", state.vram_gb)
         asyncio.create_task(register_loop(state))
+        asyncio.create_task(ws_session_loop(state))
 
     @app.on_event("shutdown")
     async def shutdown_event() -> None:
@@ -67,28 +67,8 @@ def create_app(state: NodeRuntimeState) -> FastAPI:
 
     @app.post("/startup")
     async def receive_startup(config: StartupConfig) -> dict:
-        if state.startup_config is not None:
-            return {"accepted": True, "duplicate": True}
-
-        state.startup_config = config
-        state.assignment = resolve_assignment(config, state)
-        strategy = resolve_launch_strategy(config, state)
-        state.execution_mode = strategy.execution_mode
-        state.launch_strategy = strategy.load_strategy
-        state.startup_event.set()
-        asyncio.create_task(
-            report_node_status(
-                state,
-                "assigned",
-                detail=(
-                    f"Received load plan stage={state.assignment.stage_index}/"
-                    f"{state.assignment.stage_count} role={state.assignment.stage_role}"
-                ),
-                assignment=state.assignment,
-            )
-        )
-        state.launch_task = asyncio.create_task(handle_cluster_start(state))
-        return {"accepted": True, "duplicate": False}
+        first = await apply_startup_config(state, config)
+        return {"accepted": True, "duplicate": not first}
 
     @app.get("/status")
     async def status() -> dict:

@@ -101,6 +101,36 @@ type StartupTarget struct {
 	Config StartupConfig
 }
 
+// SignalMsg is sent by a node over the WebSocket channel to advertise its external address.
+type SignalMsg struct {
+	Type          string `json:"type"` // "signal"
+	ExternalAddr  string `json:"external_addr"`
+	ExternalPort  int    `json:"external_port"`
+	TransportMode string `json:"transport_mode"` // "port_forward" | "hole_punch"
+}
+
+// NodeSignal stores one node's external address for inclusion in SignalReadyMsg.
+type NodeSignal struct {
+	NodeID        string `json:"node_id"`
+	ExternalAddr  string `json:"external_addr"`
+	ExternalPort  int    `json:"external_port"`
+	TransportMode string `json:"transport_mode"`
+}
+
+// SignalReadyMsg is broadcast to all nodes when every peer has sent a signal.
+type SignalReadyMsg struct {
+	Type      string       `json:"type"` // "signal_ready"
+	ClusterID string       `json:"cluster_id"`
+	Peers     []NodeSignal `json:"peers"`
+}
+
+// ErrorMsg is pushed by the coordinator to indicate a signaling error.
+type ErrorMsg struct {
+	Type    string `json:"type"` // "error"
+	Code    string `json:"code"` // "signal_timeout", "unknown_node"
+	Message string `json:"message"`
+}
+
 type StatusResponse struct {
 	MinNodes        int        `json:"min_nodes"`
 	RegisteredNodes int        `json:"registered_nodes"`

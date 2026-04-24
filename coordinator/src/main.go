@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"time"
 
 	"axon/coordinator/internal/server"
 )
@@ -57,6 +58,8 @@ func main() {
 	rayHeadAddress := flag.String("ray-head-address", "", "Ray head address host:port. If omitted, inferred from local IP + --ray-port")
 	autostartRayHead := flag.Bool("autostart-ray-head", false, "Start `ray start --head` before serving HTTP API")
 	rayNodeIP := flag.String("ray-node-ip", "", "IP address Ray head binds to (--node-ip-address). Defaults to detectLocalIP()")
+	clusterToken := flag.String("cluster-token", "", "Pre-shared token nodes must supply to open a WebSocket session (empty = no auth)")
+	signalTimeout := flag.Duration("signal-timeout", 60*time.Second, "Deadline for all nodes to send their signal after the first signal arrives")
 	var backendLaunchArgs server.StringArrayFlag
 	var backendEnv server.KeyValueFlag
 	flag.Var(&backendLaunchArgs, "backend-launch-arg", "Repeatable backend launch argument appended to node worker startup.")
@@ -98,6 +101,8 @@ func main() {
 			LaunchArgs:     backendLaunchArgs,
 		},
 	)
+	srv.SetSignalingOptions(*clusterToken, *signalTimeout)
+
 	addr := fmt.Sprintf("%s:%d", *host, *port)
 	log.Printf("starting coordinator on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, srv.Handler()))

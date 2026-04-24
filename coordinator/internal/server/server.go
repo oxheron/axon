@@ -29,6 +29,16 @@ type Server struct {
 	clusterID     string
 	assignments   map[string]NodeAssignment
 	startupConfig *StartupConfig
+
+	// WebSocket signaling
+	clusterToken      string
+	signalTimeout     time.Duration
+	wsSessionsMu      sync.RWMutex
+	wsSessions        map[string]*wsSession
+	nodeSignals       map[string]NodeSignal
+	signalingTimer    *time.Timer
+	signalingTimerMu  sync.Mutex
+	signalingTimerOnce sync.Once
 }
 
 func NewServer(minNodes int, modelName, rayHeadAddress, executionMode string, backendConfig BackendConfig) *Server {
@@ -42,6 +52,9 @@ func NewServer(minNodes int, modelName, rayHeadAddress, executionMode string, ba
 		nodes:          make(map[string]NodeInfo),
 		nodeRuntime:    make(map[string]NodeRuntimeStatus),
 		assignments:    make(map[string]NodeAssignment),
+		wsSessions:     make(map[string]*wsSession),
+		nodeSignals:    make(map[string]NodeSignal),
+		signalTimeout:  60 * time.Second,
 	}
 }
 
@@ -52,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/config", s.handleConfig)
 	mux.HandleFunc("/register", s.handleRegister)
 	mux.HandleFunc("/node-status", s.handleNodeStatus)
+	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/v1/", s.handleV1Proxy)
 	return mux
 }
@@ -346,7 +360,11 @@ func (s *Server) checkInferenceReady(workerURL string) bool {
 }
 
 func (s *Server) broadcastStartup(targets []StartupTarget) {
-	for _, target := range targets {
+	// Deliver over WS to nodes that already have an active session.
+	// httpTargets holds nodes without a WS session and need the HTTP fallback.
+	httpTargets := s.pushStartupConfigOverWS(targets)
+
+	for _, target := range httpTargets {
 		payload, err := json.Marshal(target.Config)
 		if err != nil {
 			log.Printf("failed to marshal startup payload for node=%s: %v", target.Node.NodeID, err)

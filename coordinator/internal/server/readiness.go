@@ -6,14 +6,16 @@ func lifecycleRank(state string) int {
 		return 1
 	case "assigned":
 		return 2
-	case "load_started":
+	case "signaling":
 		return 3
-	case "backend_joined":
+	case "load_started":
 		return 4
-	case "slice_loaded":
+	case "backend_joined":
 		return 5
-	case "pipeline_ready", "dry_run_ready":
+	case "slice_loaded":
 		return 6
+	case "pipeline_ready", "dry_run_ready":
+		return 7
 	case "failed":
 		return -1
 	default:
@@ -37,9 +39,9 @@ func backendThresholdRank(executionMode string) int {
 	case "dry_run":
 		return 0
 	case "single_node":
-		return lifecycleRank("slice_loaded")
+		return lifecycleRank("slice_loaded") // rank 6
 	default:
-		return lifecycleRank("backend_joined")
+		return lifecycleRank("backend_joined") // rank 5
 	}
 }
 

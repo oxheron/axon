@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from topology.models import NodeAssignment, StartupConfig
+
+if TYPE_CHECKING:
+    from coordinator.models import SignalReadyData
 
 
 @dataclass
@@ -21,9 +24,15 @@ class NodeRuntimeState:
     vllm_max_model_len: int
     vllm_dtype: str
 
+    # Optional pre-shared token for coordinator WebSocket auth (B-1).
+    cluster_token: str = ""
+
     startup_config: Optional[StartupConfig] = None
     assignment: Optional[NodeAssignment] = None
     startup_event: asyncio.Event = field(default_factory=asyncio.Event)
+    # Set when coordinator broadcasts signal_ready (B-1).
+    signal_ready_event: asyncio.Event = field(default_factory=asyncio.Event)
+    signal_ready: Optional[SignalReadyData] = None
     launch_task: Optional[asyncio.Task] = None
     vllm_proc: Optional[asyncio.subprocess.Process] = None
     ray_joined: bool = False

@@ -24,6 +24,7 @@ def build_state() -> NodeRuntimeState:
         bind_host="0.0.0.0",
         bind_port=9000,
         advertise_host="127.0.0.1",
+        advertise_port=9000,
         vllm_worker_port=8100,
         launch_vllm_worker=True,
         vllm_gpu_memory_utilization=0.72,
@@ -80,6 +81,54 @@ def build_dry_run_config() -> StartupConfig:
     )
 
 
+def build_multi_node_config() -> StartupConfig:
+    assignment = NodeAssignment(
+        node_id="node-a",
+        stage_index=0,
+        stage_count=2,
+        stage_role="entry",
+        load_strategy="vllm_ray_stage",
+        slice_spec=SliceSpec(
+            stage_index=0,
+            stage_count=2,
+            partition_label="0/2",
+            executable=True,
+        ),
+        worker_endpoint="http://127.0.0.1:8100",
+    )
+    return StartupConfig(
+        cluster_id="cluster-multi",
+        model_name="test-model",
+        execution_mode="vllm_ray_pipeline",
+        pipeline_parallel_size=2,
+        stage_count=2,
+        entry_node_id="node-a",
+        ray_head_address="127.0.0.1:6379",
+        backend_config=BackendConfig(ray_head_address="127.0.0.1:6379"),
+        nodes=[
+            TopologyNode(
+                node_id="node-a",
+                host="127.0.0.1",
+                port=9000,
+                callback_url="http://127.0.0.1:9000",
+                worker_url="http://127.0.0.1:8100",
+                stage_index=0,
+                stage_role="entry",
+            ),
+            TopologyNode(
+                node_id="node-b",
+                host="127.0.0.1",
+                port=9001,
+                callback_url="http://127.0.0.1:9001",
+                worker_url="http://127.0.0.1:8101",
+                stage_index=1,
+                stage_role="final",
+            ),
+        ],
+        assignment=assignment,
+    )
+
+
 class HandleClusterStartTests(IsolatedAsyncioTestCase):
     async def test_dry_run_stops_before_backend_startup(self) -> None:
         state = build_state()
@@ -100,6 +149,34 @@ class HandleClusterStartTests(IsolatedAsyncioTestCase):
         self.assertEqual(
             [call.args[1] for call in report_status.await_args_list],
             ["load_started", "slice_loaded", "dry_run_ready"],
+        )
+
+    async def test_multi_node_reports_signaling_then_gates_on_signal_ready(self) -> None:
+        """handle_cluster_start must emit 'signaling' and wait for signal_ready_event
+        before reporting 'load_started' in a multi-node non-dry-run cluster."""
+        state = build_state()
+        state.launch_vllm_worker = False  # skip torch/GPU probe, only test signaling gate
+        state.startup_config = build_multi_node_config()
+        state.startup_event.set()
+
+        async def release_signal_ready_after_short_delay() -> None:
+            await asyncio.sleep(0.05)
+            state.signal_ready_event.set()
+
+        with (
+            patch("runtime.lifecycle.report_node_status", new=AsyncMock()) as report_status,
+            patch("runtime.lifecycle.join_ray_cluster", new=AsyncMock(return_value=True)),
+        ):
+            asyncio.create_task(release_signal_ready_after_short_delay())
+            await handle_cluster_start(state)
+
+        reported_states = [call.args[1] for call in report_status.await_args_list]
+        self.assertIn("signaling", reported_states)
+        self.assertIn("load_started", reported_states)
+        self.assertLess(
+            reported_states.index("signaling"),
+            reported_states.index("load_started"),
+            "signaling must be reported before load_started",
         )
 
 

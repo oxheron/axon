@@ -21,3 +21,15 @@ class NodeStatusUpdate(BaseModel):
     lifecycle_detail: str = ""
     worker_url: str = ""
     assignment: Optional[NodeAssignment] = None
+
+
+class NodeSignalData(BaseModel):
+    node_id: str
+    external_addr: str
+    external_port: int
+    transport_mode: str
+
+
+class SignalReadyData(BaseModel):
+    cluster_id: str
+    peers: list[NodeSignalData] = []

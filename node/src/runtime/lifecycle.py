@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from typing import TYPE_CHECKING
 
 from coordinator.client import report_node_status, wait_for_worker_health
 from hardware import (
@@ -14,6 +15,9 @@ from runtime.state import NodeRuntimeState
 from runtime.strategy import LaunchStrategy, resolve_launch_strategy
 from topology.assignment import resolve_assignment
 from workers.ray_worker import join_ray_cluster, start_vllm_worker_process
+
+if TYPE_CHECKING:
+    from topology.models import StartupConfig
 
 LOGGER = logging.getLogger(__name__)
 
@@ -155,6 +159,40 @@ async def _launch_worker_for_strategy(
     return False
 
 
+async def apply_startup_config(
+    state: NodeRuntimeState, config: StartupConfig
+) -> bool:
+    """
+    Apply a received StartupConfig.  Idempotent — returns False if already applied.
+
+    Called from both the HTTP /startup endpoint and the WS receive loop so that
+    startup_config delivery works regardless of which channel arrives first.
+    """
+    if state.startup_config is not None:
+        return False
+
+    state.startup_config = config
+    state.assignment = resolve_assignment(config, state)
+    strategy = resolve_launch_strategy(config, state)
+    state.execution_mode = strategy.execution_mode
+    state.launch_strategy = strategy.load_strategy
+    state.startup_event.set()
+
+    asyncio.create_task(
+        report_node_status(
+            state,
+            "assigned",
+            detail=(
+                f"Received load plan stage={state.assignment.stage_index}/"
+                f"{state.assignment.stage_count} role={state.assignment.stage_role}"
+            ),
+            assignment=state.assignment,
+        )
+    )
+    state.launch_task = asyncio.create_task(handle_cluster_start(state))
+    return True
+
+
 async def handle_cluster_start(state: NodeRuntimeState) -> None:
     await state.startup_event.wait()
     assert state.startup_config is not None
@@ -173,6 +211,29 @@ async def handle_cluster_start(state: NodeRuntimeState) -> None:
         strategy.load_strategy,
         strategy.ray_head_address,
     )
+
+    # Multi-node non-dry_run modes must complete P2P signaling before loading.
+    needs_signaling = (
+        strategy.assignment_stage_count > 1
+        and strategy.execution_mode not in ("dry_run", "single_node")
+    )
+    if needs_signaling:
+        await report_node_status(
+            state,
+            "signaling",
+            detail=(
+                f"Waiting for P2P signal exchange "
+                f"(stage={strategy.assignment_stage_index}/{strategy.assignment_stage_count})"
+            ),
+            assignment=state.assignment,
+        )
+        await state.signal_ready_event.wait()
+        LOGGER.info(
+            "[signaling] complete: cluster=%s peers=%d",
+            config.cluster_id,
+            len(state.signal_ready.peers) if state.signal_ready else 0,
+        )
+
     await report_node_status(
         state,
         "load_started",

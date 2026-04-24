@@ -74,6 +74,11 @@ def parse_args() -> argparse.Namespace:
         default="float16",
         help="Model dtype for local worker (e.g. float16, bfloat16, auto).",
     )
+    parser.add_argument(
+        "--cluster-token",
+        default=os.environ.get("CLUSTER_TOKEN", ""),
+        help="Pre-shared token matching --cluster-token on the coordinator (empty = no auth).",
+    )
     return parser.parse_args()
 
 
@@ -91,6 +96,7 @@ def main() -> None:
         vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
         vllm_max_model_len=args.vllm_max_model_len,
         vllm_dtype=args.vllm_dtype,
+        cluster_token=args.cluster_token,
     )
     app = create_app(state)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
