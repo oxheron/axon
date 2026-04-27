@@ -23,11 +23,8 @@ func buildPeerNodes(nodes []NodeInfo, stageIndex int) []PeerNode {
 	return peers
 }
 
-func defaultExecutionMode(stageCount int) string {
-	if stageCount <= 1 {
-		return "single_node"
-	}
-	return "axon_p2p"
+func defaultExecutionMode(_ int) string {
+	return "vllm_slice"
 }
 
 func stageRoleForIndex(index, stageCount int) string {
@@ -42,15 +39,11 @@ func stageRoleForIndex(index, stageCount int) string {
 
 func loadStrategyForMode(executionMode string) string {
 	switch executionMode {
-	case "slice_loaded_pipeline":
-		return "coordinator_assigned_slice"
+	case "coordinator_slice":
+		return "coordinator_slice"
 	case "dry_run":
 		return "dry_run"
-	case "single_node":
-		return "single_node"
-	case "axon_p2p":
-		return "axon_p2p_stage"
 	default:
-		return "axon_p2p_stage"
+		return "vllm_run"
 	}
 }

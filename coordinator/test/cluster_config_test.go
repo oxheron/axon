@@ -30,8 +30,8 @@ func TestBuildClusterStartupConfigLocked(t *testing.T) {
 	if cfg.ClusterID == "" {
 		t.Fatalf("expected cluster id to be populated")
 	}
-	if cfg.ExecutionMode != "axon_p2p" {
-		t.Fatalf("expected axon_p2p execution mode, got %q", cfg.ExecutionMode)
+	if cfg.ExecutionMode != "vllm_slice" {
+		t.Fatalf("expected vllm_slice execution mode, got %q", cfg.ExecutionMode)
 	}
 	if cfg.EntryNodeID != "node-a" {
 		t.Fatalf("expected node-a as entry node, got %q", cfg.EntryNodeID)

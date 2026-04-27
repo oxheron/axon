@@ -1,1 +1,1 @@
-"""Subprocess and cluster worker integration (Ray, vLLM)."""
+"""Subprocess worker integration (vLLM)."""

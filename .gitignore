@@ -21,3 +21,7 @@ coordinator/bin/
 *.exe
 *.test
 *.out
+
+# Other
+*.log
+.DS_Store

@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-vllm-worker",
         action="store_true",
-        help="Only join Ray cluster; skip starting local vLLM API process.",
+        help="Skip starting the local vLLM worker process.",
     )
     parser.add_argument(
         "--vllm-gpu-memory-utilization",

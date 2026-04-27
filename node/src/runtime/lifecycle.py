@@ -30,8 +30,7 @@ async def _run_dry_run_strategy(
         state,
         "slice_loaded",
         detail=(
-            "Validated dry-run topology and assignment semantics without "
-            "joining Ray or launching a worker."
+            "Validated dry-run topology and assignment semantics without launching a worker."
         ),
         assignment=state.assignment,
     )
@@ -110,7 +109,7 @@ async def _launch_worker_for_strategy(
     await asyncio.to_thread(_preflight_vllm_for_accelerator, accel)
     vllm_env = build_vllm_worker_environ(accel)
     vllm_env.update(state.startup_config.backend_config.env_overrides)
-    if strategy.execution_mode == "slice_loaded_pipeline":
+    if strategy.execution_mode == "coordinator_slice":
         LOGGER.info(
             "Using coordinator-assigned slice mode for stage=%s/%s; "
             "backend still realizes placement through distributed pipeline startup.",
@@ -230,7 +229,7 @@ async def handle_cluster_start(state: NodeRuntimeState) -> None:
     # Multi-node non-dry_run modes must complete P2P signaling before loading.
     needs_signaling = (
         strategy.assignment_stage_count > 1
-        and strategy.execution_mode not in ("dry_run", "single_node")
+        and strategy.execution_mode != "dry_run"
     )
     if needs_signaling:
         await report_node_status(

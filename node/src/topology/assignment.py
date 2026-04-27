@@ -12,20 +12,16 @@ def infer_stage_role(stage_index: int, stage_count: int) -> str:
     return "middle"
 
 
-def default_execution_mode(stage_count: int) -> str:
-    if stage_count <= 1:
-        return "single_node"
-    return "axon_p2p"
+def default_execution_mode(_stage_count: int) -> str:
+    return "vllm_slice"
 
 
-def default_load_strategy(execution_mode: str, stage_count: int) -> str:
-    if execution_mode == "slice_loaded_pipeline":
-        return "coordinator_assigned_slice"
+def default_load_strategy(execution_mode: str, _stage_count: int) -> str:
+    if execution_mode == "coordinator_slice":
+        return "coordinator_slice"
     if execution_mode == "dry_run":
         return "dry_run"
-    if execution_mode == "single_node" or stage_count <= 1:
-        return "single_node"
-    return "axon_p2p_stage"
+    return "vllm_slice"
 
 
 def resolve_stage_count(config: StartupConfig) -> int:

@@ -87,7 +87,7 @@ def build_multi_node_config() -> StartupConfig:
         stage_index=0,
         stage_count=2,
         stage_role="entry",
-        load_strategy="axon_p2p_stage",
+        load_strategy="vllm_slice",
         slice_spec=SliceSpec(
             stage_index=0,
             stage_count=2,
@@ -99,7 +99,7 @@ def build_multi_node_config() -> StartupConfig:
     return StartupConfig(
         cluster_id="cluster-multi",
         model_name="test-model",
-        execution_mode="axon_p2p",
+        execution_mode="vllm_slice",
         pipeline_parallel_size=2,
         stage_count=2,
         entry_node_id="node-a",

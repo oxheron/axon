@@ -35,14 +35,10 @@ func isNodeLifecycleReady(node NodeInfo, executionMode string) bool {
 }
 
 func backendThresholdRank(executionMode string) int {
-	switch executionMode {
-	case "dry_run":
+	if executionMode == "dry_run" {
 		return 0
-	case "single_node":
-		return lifecycleRank("slice_loaded") // rank 6
-	default:
-		return lifecycleRank("backend_joined") // rank 5
 	}
+	return lifecycleRank("backend_joined") // rank 5; single-stage nodes reach slice_loaded (6) which also satisfies this
 }
 
 func isBackendReadyNode(node NodeInfo, executionMode string) bool {

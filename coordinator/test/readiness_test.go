@@ -19,11 +19,11 @@ func TestBuildStatusExecutablePipelineReadiness(t *testing.T) {
 	}))
 	defer healthServer.Close()
 
-	srv := server.NewServer(2, "test-model", "axon_p2p", server.BackendConfig{})
+	srv := server.NewServer(2, "test-model", "vllm_slice", server.BackendConfig{})
 	startup := &server.StartupConfig{
 		ClusterID:            "cluster-test",
 		ModelName:            "test-model",
-		ExecutionMode:        "axon_p2p",
+		ExecutionMode:        "vllm_slice",
 		PipelineParallelSize: 2,
 		StageCount:           2,
 		EntryNodeID:          "node-a",
@@ -53,14 +53,14 @@ func TestBuildStatusExecutablePipelineReadiness(t *testing.T) {
 				StageIndex:   0,
 				StageCount:   2,
 				StageRole:    "entry",
-				LoadStrategy: "axon_p2p_stage",
+				LoadStrategy: "vllm_slice",
 			},
 			"node-b": {
 				NodeID:       "node-b",
 				StageIndex:   1,
 				StageCount:   2,
 				StageRole:    "final",
-				LoadStrategy: "axon_p2p_stage",
+				LoadStrategy: "vllm_slice",
 			},
 		},
 		map[string]server.NodeRuntimeStatus{

@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 class StartupConfig(BaseModel):
     cluster_id: str = ""
     model_name: str
-    execution_mode: str = "single_node"
+    execution_mode: str = "vllm_slice"
     pipeline_parallel_size: int = Field(..., ge=1)
     stage_count: int = Field(1, ge=1)
     entry_node_id: str = ""

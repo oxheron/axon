@@ -56,7 +56,7 @@ func cloneBackendConfig(cfg BackendConfig) BackendConfig {
 
 func IsValidExecutionMode(mode string) bool {
 	switch mode {
-	case "", "single_node", "slice_loaded_pipeline", "axon_p2p", "dry_run":
+	case "", "vllm_slice", "coordinator_slice", "dry_run":
 		return true
 	default:
 		return false
