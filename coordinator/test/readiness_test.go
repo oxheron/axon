@@ -19,15 +19,14 @@ func TestBuildStatusExecutablePipelineReadiness(t *testing.T) {
 	}))
 	defer healthServer.Close()
 
-	srv := server.NewServer(2, "test-model", "127.0.0.1:6379", "vllm_ray_pipeline", server.BackendConfig{})
+	srv := server.NewServer(2, "test-model", "axon_p2p", server.BackendConfig{})
 	startup := &server.StartupConfig{
 		ClusterID:            "cluster-test",
 		ModelName:            "test-model",
-		ExecutionMode:        "vllm_ray_pipeline",
+		ExecutionMode:        "axon_p2p",
 		PipelineParallelSize: 2,
 		StageCount:           2,
 		EntryNodeID:          "node-a",
-		RayHeadAddress:       "127.0.0.1:6379",
 	}
 	srv.ApplyTestClusterState(
 		"cluster-test",
@@ -54,14 +53,14 @@ func TestBuildStatusExecutablePipelineReadiness(t *testing.T) {
 				StageIndex:   0,
 				StageCount:   2,
 				StageRole:    "entry",
-				LoadStrategy: "vllm_ray_stage",
+				LoadStrategy: "axon_p2p_stage",
 			},
 			"node-b": {
 				NodeID:       "node-b",
 				StageIndex:   1,
 				StageCount:   2,
 				StageRole:    "final",
-				LoadStrategy: "vllm_ray_stage",
+				LoadStrategy: "axon_p2p_stage",
 			},
 		},
 		map[string]server.NodeRuntimeStatus{
@@ -94,7 +93,7 @@ func TestBuildStatusExecutablePipelineReadiness(t *testing.T) {
 }
 
 func TestBuildStatusDryRunIsPipelineReadyButNotInferenceReady(t *testing.T) {
-	srv := server.NewServer(2, "test-model", "127.0.0.1:6379", "dry_run", server.BackendConfig{})
+	srv := server.NewServer(2, "test-model", "dry_run", server.BackendConfig{})
 	startup := &server.StartupConfig{
 		ClusterID:            "cluster-test",
 		ModelName:            "test-model",
@@ -102,7 +101,6 @@ func TestBuildStatusDryRunIsPipelineReadyButNotInferenceReady(t *testing.T) {
 		PipelineParallelSize: 2,
 		StageCount:           2,
 		EntryNodeID:          "node-a",
-		RayHeadAddress:       "127.0.0.1:6379",
 	}
 	srv.ApplyTestClusterState(
 		"cluster-test",

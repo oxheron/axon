@@ -1,7 +1,7 @@
 ---
 name: Phase B — P2P PP transport (NAT traversal)
 overview: Replace Ray as the multi-node PP transport with a custom torch.distributed ProcessGroup backend (axon_quic) that routes PP tensors over direct QUIC/UDP connections. Scoped to PP=2 across two home-NAT nodes initially, with PP>2 planned as a follow-on milestone. Within-node parallelism (TP) is unconstrained. Coordinator handles signaling only. Supports three connection modes in order of preference: port forwarding (manual), UDP hole punching (automatic cone NAT), TURN relay (fallback, deferred).
-status: in_progress (B-0 complete, B-1/B-2 ready, B-3 restructured)
+status: in_progress (B-0, B-1, B-2, B-3, B-4 complete; B-5 next)
 ---
 
 # Phase B — P2P PP transport
@@ -118,7 +118,7 @@ As described above. Written output required before proceeding.
 
 ---
 
-### B-1 — Coordinator: WebSocket control channel
+### B-1 — Coordinator: WebSocket control channel ✓ COMPLETE
 
 **File:** `coordinator/internal/server/` (new handler + types)
 
@@ -190,9 +190,11 @@ Lifecycle state addition: `signaling` between `assigned` and `backend_joined`. N
 
 **Acceptance:** two nodes both receive `signal_ready` with each other's addresses before attempting to start the executor. Connections with invalid token or unknown node_id are rejected at the WebSocket upgrade (HTTP 401/403, never upgraded). A node that never signals causes the cluster to fail with a named-node error after the configured timeout rather than hanging forever.
 
+**Status:** Done — coordinator-side WS handler (`coordinator/internal/server/ws.go`), all message types, signaling deadline, re-signaling, and keepalive pings implemented. Node-side WS client (`node/src/coordinator/ws_client.py`) connects, receives `startup_config`, sends signal with STUN-discovered address, and sets `signal_ready_event` on receipt of `signal_ready`.
+
 ---
 
-### B-2 — Node: transport negotiation module
+### B-2 — Node: transport negotiation module ✓ COMPLETE
 
 **New package:** `node/src/transport/`
 
@@ -239,9 +241,11 @@ Note `tensor: torch.Tensor`, not `bytes`: the transport owns (de)serialization i
 
 **Acceptance:** two nodes on a home network (cone NAT) reach each other via UDP and complete a QUIC handshake. Log clearly which mode succeeded and, on failure, which NAT class was detected.
 
+**Status:** Done — `node/src/transport/` package built: `P2PTransport` interface, port-forward mode (`port_forward.py`), UDP hole punch + dual-STUN symmetric NAT detection (`hole_punch.py`), aioquic QUIC connection wrapper (`quic_conn.py`). STUN discovery runs eagerly at startup (`api/app.py`); STUN-discovered address is used in the coordinator signal. `lifecycle.py` calls `transport.connect()` after `signal_ready_event` and reports `failed` on error. `pystun3` and `aioquic` added to `requirements-base.txt`.
+
 ---
 
-### B-3 — Custom `torch.distributed` ProcessGroup backend (`axon_quic`)
+### B-3 — Custom `torch.distributed` ProcessGroup backend (`axon_quic`) ✓ COMPLETE
 
 **New package:** `node/src/axon_quic/`
 
@@ -337,7 +341,7 @@ In `node/src/strategy.py`, when `backend == "axon_p2p"` (the per-cluster field s
 
 ---
 
-### B-4 — Remove Ray from multi-node path
+### B-4 — Remove Ray from multi-node path ✓ COMPLETE
 
 Once B-3 is working, clean up:
 

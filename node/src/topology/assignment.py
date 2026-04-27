@@ -15,7 +15,7 @@ def infer_stage_role(stage_index: int, stage_count: int) -> str:
 def default_execution_mode(stage_count: int) -> str:
     if stage_count <= 1:
         return "single_node"
-    return "vllm_ray_pipeline"
+    return "axon_p2p"
 
 
 def default_load_strategy(execution_mode: str, stage_count: int) -> str:
@@ -25,17 +25,11 @@ def default_load_strategy(execution_mode: str, stage_count: int) -> str:
         return "dry_run"
     if execution_mode == "single_node" or stage_count <= 1:
         return "single_node"
-    return "vllm_ray_stage"
+    return "axon_p2p_stage"
 
 
 def resolve_stage_count(config: StartupConfig) -> int:
     return max(1, config.stage_count or config.pipeline_parallel_size)
-
-
-def resolve_ray_head_address(config: StartupConfig) -> str:
-    if config.backend_config.ray_head_address:
-        return config.backend_config.ray_head_address
-    return config.ray_head_address
 
 
 def build_default_assignment(

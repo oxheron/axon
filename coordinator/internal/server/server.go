@@ -15,10 +15,9 @@ import (
 )
 
 type Server struct {
-	minNodes       int
-	modelName      string
-	rayHeadAddress string
-	executionMode  string
+	minNodes      int
+	modelName     string
+	executionMode string
 	backendConfig  BackendConfig
 	client         *http.Client
 
@@ -39,14 +38,16 @@ type Server struct {
 	signalingTimer    *time.Timer
 	signalingTimerMu  sync.Mutex
 	signalingTimerOnce sync.Once
+
+	// B-3: KV store for torch.distributed rendezvous
+	store *storeRegistry
 }
 
-func NewServer(minNodes int, modelName, rayHeadAddress, executionMode string, backendConfig BackendConfig) *Server {
+func NewServer(minNodes int, modelName, executionMode string, backendConfig BackendConfig) *Server {
 	return &Server{
-		minNodes:       minNodes,
-		modelName:      modelName,
-		rayHeadAddress: rayHeadAddress,
-		executionMode:  executionMode,
+		minNodes:      minNodes,
+		modelName:     modelName,
+		executionMode: executionMode,
 		backendConfig:  cloneBackendConfig(backendConfig),
 		client:         &http.Client{},
 		nodes:          make(map[string]NodeInfo),
@@ -55,6 +56,7 @@ func NewServer(minNodes int, modelName, rayHeadAddress, executionMode string, ba
 		wsSessions:     make(map[string]*wsSession),
 		nodeSignals:    make(map[string]NodeSignal),
 		signalTimeout:  60 * time.Second,
+		store:          newStoreRegistry(),
 	}
 }
 
@@ -66,6 +68,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/register", s.handleRegister)
 	mux.HandleFunc("/node-status", s.handleNodeStatus)
 	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/store/", s.handleStore)
 	mux.HandleFunc("/v1/", s.handleV1Proxy)
 	return mux
 }
@@ -270,7 +273,6 @@ func (s *Server) BuildStatus() StatusResponse {
 	cfg := s.startupConfig
 	clusterID := s.clusterID
 	modelName := s.modelName
-	rayHeadAddress := s.rayHeadAddress
 	selected := ""
 	executionMode := ""
 	stageCount := 0
@@ -330,12 +332,11 @@ func (s *Server) BuildStatus() StatusResponse {
 		BackendReady:    backendReady,
 		PipelineReady:   pipelineReady,
 		InferenceReady:  inferenceReady,
-		ClusterID:       clusterID,
-		ModelName:       modelName,
-		ExecutionMode:   executionMode,
-		StageCount:      stageCount,
-		RayHeadAddress:  rayHeadAddress,
-		EntryNodeID:     entryNodeID,
+		ClusterID:      clusterID,
+		ModelName:      modelName,
+		ExecutionMode:  executionMode,
+		StageCount:     stageCount,
+		EntryNodeID:    entryNodeID,
 		SelectedNodeID:  selected,
 		Nodes:           nodes,
 	}
@@ -492,9 +493,6 @@ func (s *Server) BuildClusterStartupConfigLocked() (StartupConfig, []StartupTarg
 	}
 
 	backendConfig := cloneBackendConfig(s.backendConfig)
-	if backendConfig.RayHeadAddress == "" {
-		backendConfig.RayHeadAddress = s.rayHeadAddress
-	}
 
 	clusterCfg := StartupConfig{
 		ClusterID:            s.clusterID,
@@ -503,7 +501,6 @@ func (s *Server) BuildClusterStartupConfigLocked() (StartupConfig, []StartupTarg
 		PipelineParallelSize: stageCount,
 		StageCount:           stageCount,
 		EntryNodeID:          entryNodeID,
-		RayHeadAddress:       s.rayHeadAddress,
 		Nodes:                topology,
 		BackendConfig:        backendConfig,
 	}

@@ -43,8 +43,7 @@ func (f *KeyValueFlag) Set(value string) error {
 
 func cloneBackendConfig(cfg BackendConfig) BackendConfig {
 	cloned := BackendConfig{
-		RayHeadAddress: cfg.RayHeadAddress,
-		LaunchArgs:     append([]string(nil), cfg.LaunchArgs...),
+		LaunchArgs: append([]string(nil), cfg.LaunchArgs...),
 	}
 	if len(cfg.EnvOverrides) > 0 {
 		cloned.EnvOverrides = make(map[string]string, len(cfg.EnvOverrides))
@@ -57,7 +56,7 @@ func cloneBackendConfig(cfg BackendConfig) BackendConfig {
 
 func IsValidExecutionMode(mode string) bool {
 	switch mode {
-	case "", "single_node", "slice_loaded_pipeline", "vllm_ray_pipeline", "dry_run":
+	case "", "single_node", "slice_loaded_pipeline", "axon_p2p", "dry_run":
 		return true
 	default:
 		return false

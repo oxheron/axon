@@ -11,6 +11,7 @@ from hardware import detect_vram_gb
 from runtime.lifecycle import apply_startup_config
 from runtime.state import NodeRuntimeState
 from topology.models import StartupConfig
+from transport.hole_punch import run_stun_discovery_for_state
 
 LOGGER = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ def create_app(state: NodeRuntimeState) -> FastAPI:
         state.vram_gb = detect_vram_gb()
         LOGGER.info("Detected VRAM: %.2f GiB", state.vram_gb)
         asyncio.create_task(register_loop(state))
+        asyncio.create_task(run_stun_discovery_for_state(state))
         asyncio.create_task(ws_session_loop(state))
 
     @app.on_event("shutdown")
@@ -49,7 +51,6 @@ def create_app(state: NodeRuntimeState) -> FastAPI:
             "node_id": state.node_id,
             "registered_vram_gb": state.vram_gb,
             "worker_url": state.worker_url(),
-            "ray_joined": state.ray_joined,
             "startup_received": state.startup_config is not None,
             "cluster_id": state.startup_config.cluster_id if state.startup_config else "",
             "execution_mode": state.execution_mode,
@@ -76,7 +77,6 @@ def create_app(state: NodeRuntimeState) -> FastAPI:
             "node_id": state.node_id,
             "vram_gb": state.vram_gb,
             "worker_url": state.worker_url(),
-            "ray_joined": state.ray_joined,
             "execution_mode": state.execution_mode,
             "launch_strategy": state.launch_strategy,
             "lifecycle_state": state.lifecycle_state,

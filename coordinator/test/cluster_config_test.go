@@ -7,7 +7,7 @@ import (
 )
 
 func TestBuildClusterStartupConfigLocked(t *testing.T) {
-	srv := server.NewServer(2, "test-model", "127.0.0.1:6379", "", server.BackendConfig{})
+	srv := server.NewServer(2, "test-model", "", server.BackendConfig{})
 	srv.ApplyTestClusterState("", []string{"node-a", "node-b"}, map[string]server.NodeInfo{
 		"node-a": {
 			NodeID:      "node-a",
@@ -30,8 +30,8 @@ func TestBuildClusterStartupConfigLocked(t *testing.T) {
 	if cfg.ClusterID == "" {
 		t.Fatalf("expected cluster id to be populated")
 	}
-	if cfg.ExecutionMode != "vllm_ray_pipeline" {
-		t.Fatalf("expected vllm_ray_pipeline execution mode, got %q", cfg.ExecutionMode)
+	if cfg.ExecutionMode != "axon_p2p" {
+		t.Fatalf("expected axon_p2p execution mode, got %q", cfg.ExecutionMode)
 	}
 	if cfg.EntryNodeID != "node-a" {
 		t.Fatalf("expected node-a as entry node, got %q", cfg.EntryNodeID)
@@ -70,7 +70,6 @@ func TestBuildClusterStartupConfigLockedHonorsExplicitModeAndBackendConfig(t *te
 	srv := server.NewServer(
 		2,
 		"test-model",
-		"127.0.0.1:6379",
 		"dry_run",
 		server.BackendConfig{
 			EnvOverrides: map[string]string{
@@ -100,9 +99,6 @@ func TestBuildClusterStartupConfigLockedHonorsExplicitModeAndBackendConfig(t *te
 
 	if cfg.ExecutionMode != "dry_run" {
 		t.Fatalf("expected dry_run execution mode, got %q", cfg.ExecutionMode)
-	}
-	if cfg.BackendConfig.RayHeadAddress != "127.0.0.1:6379" {
-		t.Fatalf("expected ray head address in backend config, got %q", cfg.BackendConfig.RayHeadAddress)
 	}
 	if cfg.BackendConfig.EnvOverrides["AXON_PHASE"] != "two" {
 		t.Fatalf("missing backend env override: %+v", cfg.BackendConfig.EnvOverrides)

@@ -18,7 +18,7 @@ func wsURLFor(ts *httptest.Server) string {
 
 func twoNodeServer(t *testing.T) (*server.Server, *httptest.Server) {
 	t.Helper()
-	srv := server.NewServer(2, "test-model", "", "dry_run", server.BackendConfig{})
+	srv := server.NewServer(2, "test-model", "dry_run", server.BackendConfig{})
 	startup := &server.StartupConfig{
 		ClusterID:            "cluster-ws-test",
 		ModelName:            "test-model",
@@ -67,7 +67,7 @@ func TestWSHandlerRejectsUnknownNodeID(t *testing.T) {
 }
 
 func TestWSHandlerRejectsWrongToken(t *testing.T) {
-	srv := server.NewServer(2, "test-model", "", "", server.BackendConfig{})
+	srv := server.NewServer(2, "test-model", "", server.BackendConfig{})
 	srv.SetSignalingOptions("sekret", 10*time.Second)
 	srv.ApplyTestClusterState("", []string{"node-a"}, map[string]server.NodeInfo{
 		"node-a": {NodeID: "node-a", Host: "127.0.0.1", Port: 9000},
@@ -84,7 +84,7 @@ func TestWSHandlerRejectsWrongToken(t *testing.T) {
 }
 
 func TestWSHandlerAcceptsValidTokenAndPushesStartupConfig(t *testing.T) {
-	srv := server.NewServer(2, "test-model", "", "dry_run", server.BackendConfig{})
+	srv := server.NewServer(2, "test-model", "dry_run", server.BackendConfig{})
 	srv.SetSignalingOptions("sekret", 10*time.Second)
 	startup := &server.StartupConfig{
 		ClusterID: "cluster-tok", ModelName: "test-model",
@@ -201,7 +201,7 @@ func TestWSHandlerSignalReadyBroadcastWhenBothNodesSignal(t *testing.T) {
 }
 
 func TestWSHandlerSignalTimeoutSendsError(t *testing.T) {
-	srv := server.NewServer(2, "test-model", "", "dry_run", server.BackendConfig{})
+	srv := server.NewServer(2, "test-model", "dry_run", server.BackendConfig{})
 	srv.SetSignalingOptions("", 100*time.Millisecond) // very short timeout
 	startup := &server.StartupConfig{
 		ClusterID: "cluster-to", ModelName: "test-model",

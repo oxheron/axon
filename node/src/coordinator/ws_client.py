@@ -119,25 +119,34 @@ async def _recv_loop(state: NodeRuntimeState, ws: object) -> None:
 
 
 async def _send_signal_when_ready(state: NodeRuntimeState, ws: object) -> None:
-    """Wait for startup_config to arrive then send this node's signal."""
+    """Wait for startup_config and STUN discovery, then send this node's signal."""
     await state.startup_event.wait()
+    await state.stun_ready_event.wait()
 
     transport_mode = (
         "port_forward" if state.advertise_port != state.bind_port else "hole_punch"
     )
+    # Use STUN-discovered external address when available (hole-punch mode).
+    if transport_mode == "hole_punch" and state.stun_external_addr:
+        external_addr = state.stun_external_addr
+        external_port = state.stun_external_port
+    else:
+        external_addr = state.advertise_host
+        external_port = state.advertise_port
+
     signal = json.dumps(
         {
             "type": "signal",
-            "external_addr": state.advertise_host,
-            "external_port": state.advertise_port,
+            "external_addr": external_addr,
+            "external_port": external_port,
             "transport_mode": transport_mode,
         }
     )
     await ws.send(signal)  # type: ignore[attr-defined]
     LOGGER.info(
         "[ws] signal sent: addr=%s:%d mode=%s",
-        state.advertise_host,
-        state.advertise_port,
+        external_addr,
+        external_port,
         transport_mode,
     )
 

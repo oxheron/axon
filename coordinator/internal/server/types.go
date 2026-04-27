@@ -38,8 +38,7 @@ type NodeAssignment struct {
 }
 
 type BackendConfig struct {
-	RayHeadAddress string            `json:"ray_head_address,omitempty"`
-	EnvOverrides   map[string]string `json:"env_overrides,omitempty"`
+	EnvOverrides map[string]string `json:"env_overrides,omitempty"`
 	LaunchArgs     []string          `json:"launch_args,omitempty"`
 }
 
@@ -50,7 +49,6 @@ type StartupConfig struct {
 	PipelineParallelSize int             `json:"pipeline_parallel_size"`
 	StageCount           int             `json:"stage_count,omitempty"`
 	EntryNodeID          string          `json:"entry_node_id,omitempty"`
-	RayHeadAddress       string          `json:"ray_head_address"`
 	Nodes                []NodeInfo      `json:"nodes,omitempty"`
 	Assignment           *NodeAssignment `json:"assignment,omitempty"`
 	BackendConfig        BackendConfig   `json:"backend_config,omitempty"`
@@ -144,7 +142,6 @@ type StatusResponse struct {
 	ModelName       string     `json:"model_name"`
 	ExecutionMode   string     `json:"execution_mode,omitempty"`
 	StageCount      int        `json:"stage_count,omitempty"`
-	RayHeadAddress  string     `json:"ray_head_address"`
 	EntryNodeID     string     `json:"entry_node_id,omitempty"`
 	SelectedNodeID  string     `json:"selected_node_id,omitempty"`
 	Nodes           []NodeInfo `json:"nodes"`

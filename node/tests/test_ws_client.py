@@ -20,7 +20,7 @@ from topology.models import BackendConfig, NodeAssignment, SliceSpec, StartupCon
 
 
 def build_state(advertise_port: int = 9000, bind_port: int = 9000) -> NodeRuntimeState:
-    return NodeRuntimeState(
+    state = NodeRuntimeState(
         coordinator_url="http://127.0.0.1:8000",
         node_id="node-a",
         bind_host="0.0.0.0",
@@ -33,6 +33,9 @@ def build_state(advertise_port: int = 9000, bind_port: int = 9000) -> NodeRuntim
         vllm_max_model_len=1024,
         vllm_dtype="float16",
     )
+    # Pre-set stun_ready_event so unit tests don't depend on STUN network calls.
+    state.stun_ready_event.set()
+    return state
 
 
 def build_startup_config() -> StartupConfig:
@@ -43,7 +46,6 @@ def build_startup_config() -> StartupConfig:
         pipeline_parallel_size=1,
         stage_count=1,
         entry_node_id="node-a",
-        ray_head_address="",
         backend_config=BackendConfig(),
         nodes=[
             TopologyNode(
@@ -115,6 +117,18 @@ class SendSignalTests(IsolatedAsyncioTestCase):
         await _send_signal_when_ready(state, mock_ws)
         payload = json.loads(mock_ws.send.call_args[0][0])
         self.assertEqual(payload["transport_mode"], "port_forward")
+
+    async def test_uses_stun_addr_when_available_in_hole_punch_mode(self) -> None:
+        state = build_state(advertise_port=9000, bind_port=9000)  # hole_punch mode
+        state.startup_event.set()
+        state.stun_external_addr = "5.5.5.5"
+        state.stun_external_port = 54321
+        mock_ws = AsyncMock()
+        await _send_signal_when_ready(state, mock_ws)
+        payload = json.loads(mock_ws.send.call_args[0][0])
+        self.assertEqual(payload["external_addr"], "5.5.5.5")
+        self.assertEqual(payload["external_port"], 54321)
+        self.assertEqual(payload["transport_mode"], "hole_punch")
 
     async def test_waits_for_startup_event_before_sending(self) -> None:
         state = build_state()

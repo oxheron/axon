@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 from unittest import IsolatedAsyncioTestCase, TestCase
@@ -55,8 +56,7 @@ def build_dry_run_config() -> StartupConfig:
         pipeline_parallel_size=2,
         stage_count=2,
         entry_node_id="node-a",
-        ray_head_address="127.0.0.1:6379",
-        backend_config=BackendConfig(ray_head_address="127.0.0.1:6379"),
+        backend_config=BackendConfig(),
         nodes=[
             TopologyNode(
                 node_id="node-a",
@@ -87,7 +87,7 @@ def build_multi_node_config() -> StartupConfig:
         stage_index=0,
         stage_count=2,
         stage_role="entry",
-        load_strategy="vllm_ray_stage",
+        load_strategy="axon_p2p_stage",
         slice_spec=SliceSpec(
             stage_index=0,
             stage_count=2,
@@ -99,12 +99,11 @@ def build_multi_node_config() -> StartupConfig:
     return StartupConfig(
         cluster_id="cluster-multi",
         model_name="test-model",
-        execution_mode="vllm_ray_pipeline",
+        execution_mode="axon_p2p",
         pipeline_parallel_size=2,
         stage_count=2,
         entry_node_id="node-a",
-        ray_head_address="127.0.0.1:6379",
-        backend_config=BackendConfig(ray_head_address="127.0.0.1:6379"),
+        backend_config=BackendConfig(),
         nodes=[
             TopologyNode(
                 node_id="node-a",
@@ -137,14 +136,12 @@ class HandleClusterStartTests(IsolatedAsyncioTestCase):
 
         with (
             patch("runtime.lifecycle.report_node_status", new=AsyncMock()) as report_status,
-            patch("runtime.lifecycle.join_ray_cluster", new=AsyncMock()) as join_ray_cluster,
             patch(
                 "runtime.lifecycle.start_vllm_worker_process", new=AsyncMock()
             ) as start_vllm_worker_process,
         ):
             await handle_cluster_start(state)
 
-        join_ray_cluster.assert_not_awaited()
         start_vllm_worker_process.assert_not_awaited()
         self.assertEqual(
             [call.args[1] for call in report_status.await_args_list],
@@ -165,7 +162,6 @@ class HandleClusterStartTests(IsolatedAsyncioTestCase):
 
         with (
             patch("runtime.lifecycle.report_node_status", new=AsyncMock()) as report_status,
-            patch("runtime.lifecycle.join_ray_cluster", new=AsyncMock(return_value=True)),
         ):
             asyncio.create_task(release_signal_ready_after_short_delay())
             await handle_cluster_start(state)
@@ -213,6 +209,5 @@ class AssignmentResolutionTests(TestCase):
 
         self.assertEqual(strategy.execution_mode, "dry_run")
         self.assertEqual(strategy.load_strategy, "dry_run")
-        self.assertFalse(strategy.requires_ray)
         self.assertFalse(strategy.launches_worker)
         self.assertEqual(strategy.final_lifecycle_state, "dry_run_ready")

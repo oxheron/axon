@@ -10,7 +10,6 @@ class StartupConfig(BaseModel):
     pipeline_parallel_size: int = Field(..., ge=1)
     stage_count: int = Field(1, ge=1)
     entry_node_id: str = ""
-    ray_head_address: str = ""
     nodes: list["TopologyNode"] = Field(default_factory=list)
     assignment: Optional["NodeAssignment"] = None
     backend_config: "BackendConfig" = Field(default_factory=lambda: BackendConfig())
@@ -54,7 +53,6 @@ class NodeAssignment(BaseModel):
 
 
 class BackendConfig(BaseModel):
-    ray_head_address: str = ""
     env_overrides: dict[str, str] = Field(default_factory=dict)
     launch_args: list[str] = Field(default_factory=list)
 

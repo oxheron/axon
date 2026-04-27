@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
@@ -5,31 +7,6 @@ import sys
 from typing import Optional
 
 LOGGER = logging.getLogger(__name__)
-
-
-async def join_ray_cluster(ray_head_address: str) -> bool:
-    cmd = [
-        "ray",
-        "start",
-        "--address",
-        ray_head_address,
-        "--disable-usage-stats",
-        "--num-gpus",
-        "1",
-    ]
-    LOGGER.info("Joining Ray cluster: %s", " ".join(cmd))
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        combined = (stderr or stdout).decode().strip()
-        LOGGER.warning("Ray join returned %s: %s", proc.returncode, combined)
-        return False
-    LOGGER.info("Ray join completed successfully.")
-    return True
 
 
 async def _pipe_subprocess_output(stream: asyncio.StreamReader, prefix: str) -> None:
@@ -52,9 +29,10 @@ async def start_vllm_worker_process(
     gpu_memory_utilization: float,
     max_model_len: int,
     dtype: str,
-    distributed_backend: str = "ray",
+    distributed_backend: str = "mp",
     env: Optional[dict[str, str]] = None,
     extra_args: Optional[list[str]] = None,
+    transport_env: Optional[dict[str, str]] = None,
 ) -> asyncio.subprocess.Process:
     cmd = [
         sys.executable,
@@ -81,10 +59,13 @@ async def start_vllm_worker_process(
     ]
     if extra_args:
         cmd.extend(extra_args)
+    merged_env = dict(env if env is not None else os.environ)
+    if transport_env:
+        merged_env.update(transport_env)
     LOGGER.info("Starting local vLLM worker API: %s", " ".join(cmd))
     proc = await asyncio.create_subprocess_exec(
         *cmd,
-        env=env if env is not None else os.environ,
+        env=merged_env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )

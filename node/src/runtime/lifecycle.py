@@ -14,7 +14,7 @@ from hardware import (
 from runtime.state import NodeRuntimeState
 from runtime.strategy import LaunchStrategy, resolve_launch_strategy
 from topology.assignment import resolve_assignment
-from workers.ray_worker import join_ray_cluster, start_vllm_worker_process
+from workers.vllm_worker import start_vllm_worker_process
 
 if TYPE_CHECKING:
     from topology.models import StartupConfig
@@ -45,40 +45,35 @@ async def _run_dry_run_strategy(
     )
 
 
-async def _join_backend_runtime(
-    state: NodeRuntimeState, strategy: LaunchStrategy
-) -> bool:
-    assert state.assignment is not None
-    if not strategy.requires_ray:
-        LOGGER.info("Single-node mode: skipping Ray cluster join, using mp backend.")
-        return True
-    if not strategy.ray_head_address:
-        state.vllm_launch_error = "missing_ray_head_address"
-        await report_node_status(
-            state,
-            "failed",
-            detail="Startup plan requires multi-node backend but no Ray head address was provided.",
-            assignment=state.assignment,
-        )
-        return False
 
-    state.ray_joined = await join_ray_cluster(strategy.ray_head_address)
-    if not state.ray_joined:
-        state.vllm_launch_error = "ray_join_failed"
-        await report_node_status(
-            state,
-            "failed",
-            detail=f"Failed to join Ray cluster at {strategy.ray_head_address}.",
-            assignment=state.assignment,
-        )
-        return False
-    await report_node_status(
-        state,
-        "backend_joined",
-        detail=f"Joined Ray cluster at {strategy.ray_head_address}.",
-        assignment=state.assignment,
-    )
-    return True
+def _build_peers_by_rank(state: NodeRuntimeState) -> list[str]:
+    """Return peer node_ids ordered by PP stage_index (excludes this node)."""
+    if state.startup_config is None or state.signal_ready is None:
+        return []
+    # Build a map from node_id → stage_index using startup_config.nodes
+    stage_map: dict[str, int] = {}
+    for node in state.startup_config.nodes:
+        stage_map[node.node_id] = node.stage_index
+
+    peer_ids = [
+        p.node_id
+        for p in state.signal_ready.peers
+        if p.node_id != state.node_id
+    ]
+    # Sort by stage_index so peers_by_rank[i] == node_id for PP rank i
+    peer_ids_by_rank = sorted(peer_ids, key=lambda nid: stage_map.get(nid, 999))
+    # Insert this node's own position as a sentinel "" so that the peer_idx
+    # passed by vLLM (which IS a rank, including self) maps correctly.
+    own_stage = stage_map.get(state.node_id, 0)
+    result: list[str] = []
+    peer_it = iter(peer_ids_by_rank)
+    all_stages = sorted(stage_map.keys(), key=lambda nid: stage_map[nid])
+    for nid in all_stages:
+        if nid == state.node_id:
+            result.append("")  # self — sidecar ignores sends to itself
+        else:
+            result.append(next(peer_it, ""))
+    return result
 
 
 async def _launch_worker_for_strategy(
@@ -122,6 +117,26 @@ async def _launch_worker_for_strategy(
             strategy.assignment_stage_index,
             strategy.assignment_stage_count,
         )
+
+    # B-3: Build transport env for the vLLM subprocess when the P2P sidecar is active.
+    transport_env: dict[str, str] | None = None
+    if state.p2p_transport and state.transport_uds_path and state.assignment:
+        transport_env = {
+            "AXON_TRANSPORT_UDS": state.transport_uds_path,
+            "AXON_PP_RANK": str(state.assignment.stage_index),
+            "AXON_PP_SIZE": str(state.assignment.stage_count),
+            "AXON_PP_BACKEND": "axon_quic",
+            "AXON_COORDINATOR_URL": state.coordinator_url,
+            "AXON_CLUSTER_ID": state.startup_config.cluster_id,
+            "AXON_WIRE_DTYPE": os.environ.get("AXON_WIRE_DTYPE", "fp8"),
+        }
+        LOGGER.info(
+            "[lifecycle] transport env: rank=%s size=%s uds=%s",
+            transport_env["AXON_PP_RANK"],
+            transport_env["AXON_PP_SIZE"],
+            state.transport_uds_path,
+        )
+
     state.vllm_proc = await start_vllm_worker_process(
         model_name=model_name,
         pipeline_parallel_size=strategy.stage_count,
@@ -132,6 +147,7 @@ async def _launch_worker_for_strategy(
         distributed_backend=strategy.distributed_backend,
         env=vllm_env,
         extra_args=state.startup_config.backend_config.launch_args,
+        transport_env=transport_env,
     )
     LOGGER.info("vLLM worker started with pid=%s", state.vllm_proc.pid)
     await report_node_status(
@@ -202,14 +218,13 @@ async def handle_cluster_start(state: NodeRuntimeState) -> None:
     state.execution_mode = strategy.execution_mode
     state.launch_strategy = strategy.load_strategy
     LOGGER.info(
-        "Received startup signal: cluster=%s model=%s mode=%s stage=%s/%s strategy=%s ray=%s",
+        "Received startup signal: cluster=%s model=%s mode=%s stage=%s/%s strategy=%s",
         config.cluster_id,
         config.model_name,
         strategy.execution_mode,
         strategy.assignment_stage_index,
         strategy.assignment_stage_count,
         strategy.load_strategy,
-        strategy.ray_head_address,
     )
 
     # Multi-node non-dry_run modes must complete P2P signaling before loading.
@@ -234,6 +249,75 @@ async def handle_cluster_start(state: NodeRuntimeState) -> None:
             len(state.signal_ready.peers) if state.signal_ready else 0,
         )
 
+        # B-2: establish P2P transport connections after signaling.
+        if state.signal_ready and state.signal_ready.peers:
+            from transport import P2PTransport, PeerEndpoint, TransportMode  # noqa: PLC0415
+
+            peers = [
+                PeerEndpoint(
+                    node_id=p.node_id,
+                    external_addr=p.external_addr,
+                    external_port=p.external_port,
+                    transport_mode=TransportMode(p.transport_mode),
+                )
+                for p in state.signal_ready.peers
+                if p.node_id != state.node_id
+            ]
+            t_mode = (
+                TransportMode.PORT_FORWARD
+                if state.advertise_port != state.bind_port
+                else TransportMode.HOLE_PUNCH
+            )
+            transport = P2PTransport(
+                node_id=state.node_id,
+                bind_host=state.bind_host,
+                bind_port=state.bind_port,
+                advertise_port=state.advertise_port,
+                transport_mode=t_mode,
+            )
+            try:
+                await transport.connect(peers, timeout=30.0)
+                state.p2p_transport = transport
+                LOGGER.info(
+                    "[transport] connected: cluster=%s peers=%d mode=%s",
+                    config.cluster_id,
+                    len(peers),
+                    t_mode.value,
+                )
+            except Exception as exc:
+                LOGGER.error("[transport] connect failed: %s", exc)
+                await report_node_status(
+                    state,
+                    "failed",
+                    detail=f"P2P transport connect failed: {exc}",
+                    assignment=state.assignment,
+                )
+                return
+
+            # B-3: Start UDS sidecar so the vLLM subprocess can use the QUIC connections.
+            try:
+                from transport.sidecar import TransportSidecar  # noqa: PLC0415
+                uds_path = f"/tmp/axon-{config.cluster_id}.sock"
+                peers_by_rank = _build_peers_by_rank(state)
+                sidecar = TransportSidecar(transport, uds_path, peers_by_rank)
+                await sidecar.start()
+                state.transport_sidecar = sidecar
+                state.transport_uds_path = uds_path
+                LOGGER.info(
+                    "[sidecar] started: path=%s peers_by_rank=%s",
+                    uds_path,
+                    peers_by_rank,
+                )
+            except Exception as exc:
+                LOGGER.error("[sidecar] failed to start: %s", exc)
+                await report_node_status(
+                    state,
+                    "failed",
+                    detail=f"Transport sidecar start failed: {exc}",
+                    assignment=state.assignment,
+                )
+                return
+
     await report_node_status(
         state,
         "load_started",
@@ -247,9 +331,6 @@ async def handle_cluster_start(state: NodeRuntimeState) -> None:
 
     if strategy.execution_mode == "dry_run":
         await _run_dry_run_strategy(state, strategy)
-        return
-
-    if not await _join_backend_runtime(state, strategy):
         return
 
     if strategy.launches_worker:

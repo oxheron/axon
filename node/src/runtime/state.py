@@ -8,6 +8,8 @@ from topology.models import NodeAssignment, StartupConfig
 
 if TYPE_CHECKING:
     from coordinator.models import SignalReadyData
+    from transport.p2p import P2PTransport
+    from transport.sidecar import TransportSidecar
 
 
 @dataclass
@@ -27,6 +29,18 @@ class NodeRuntimeState:
     # Optional pre-shared token for coordinator WebSocket auth (B-1).
     cluster_token: str = ""
 
+    # B-2: STUN-discovered external address for hole-punch mode.
+    # Empty string means STUN has not run or port-forward mode is active.
+    stun_external_addr: str = ""
+    stun_external_port: int = 0
+    # Set by run_stun_discovery_for_state() before ws_client sends the signal.
+    stun_ready_event: asyncio.Event = field(default_factory=asyncio.Event)
+    # Set in lifecycle.py after transport.connect() succeeds.
+    p2p_transport: Optional["P2PTransport"] = None
+    # Set in lifecycle.py after the UDS sidecar starts (B-3).
+    transport_sidecar: Optional["TransportSidecar"] = None
+    transport_uds_path: str = ""
+
     startup_config: Optional[StartupConfig] = None
     assignment: Optional[NodeAssignment] = None
     startup_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -35,7 +49,6 @@ class NodeRuntimeState:
     signal_ready: Optional[SignalReadyData] = None
     launch_task: Optional[asyncio.Task] = None
     vllm_proc: Optional[asyncio.subprocess.Process] = None
-    ray_joined: bool = False
     vram_gb: float = 0.0
     vllm_launch_error: Optional[str] = None
     execution_mode: str = ""

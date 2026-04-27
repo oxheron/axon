@@ -27,7 +27,7 @@ func defaultExecutionMode(stageCount int) string {
 	if stageCount <= 1 {
 		return "single_node"
 	}
-	return "vllm_ray_pipeline"
+	return "axon_p2p"
 }
 
 func stageRoleForIndex(index, stageCount int) string {
@@ -48,7 +48,9 @@ func loadStrategyForMode(executionMode string) string {
 		return "dry_run"
 	case "single_node":
 		return "single_node"
+	case "axon_p2p":
+		return "axon_p2p_stage"
 	default:
-		return "vllm_ray_stage"
+		return "axon_p2p_stage"
 	}
 }
