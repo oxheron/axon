@@ -23,6 +23,63 @@ PUNCH_PAYLOAD = b"AXON-PUNCH"
 PUNCH_TIMEOUT = 30.0
 
 
+async def _sock_recvfrom(
+    loop: asyncio.AbstractEventLoop, sock: socket.socket, nbytes: int
+) -> tuple[bytes, tuple]:
+    """Async recvfrom compatible with Python < 3.11 (loop.sock_recvfrom added in 3.11)."""
+    fut: asyncio.Future = loop.create_future()
+
+    def _on_readable() -> None:
+        loop.remove_reader(sock.fileno())
+        try:
+            result = sock.recvfrom(nbytes)
+        except Exception as exc:  # noqa: BLE001
+            if not fut.done():
+                fut.set_exception(exc)
+        else:
+            if not fut.done():
+                fut.set_result(result)
+
+    loop.add_reader(sock.fileno(), _on_readable)
+    try:
+        return await fut
+    except asyncio.CancelledError:
+        loop.remove_reader(sock.fileno())
+        raise
+
+
+async def _sock_sendto(
+    loop: asyncio.AbstractEventLoop, sock: socket.socket, data: bytes, addr: tuple
+) -> None:
+    """Async sendto compatible with Python < 3.11 (loop.sock_sendto added in 3.11).
+    UDP sends almost never block; falls back to add_writer only if EAGAIN."""
+    try:
+        sock.sendto(data, addr)
+        return
+    except BlockingIOError:
+        pass
+
+    fut: asyncio.Future = loop.create_future()
+
+    def _on_writable() -> None:
+        loop.remove_writer(sock.fileno())
+        try:
+            sock.sendto(data, addr)
+        except Exception as exc:  # noqa: BLE001
+            if not fut.done():
+                fut.set_exception(exc)
+        else:
+            if not fut.done():
+                fut.set_result(None)
+
+    loop.add_writer(sock.fileno(), _on_writable)
+    try:
+        await fut
+    except asyncio.CancelledError:
+        loop.remove_writer(sock.fileno())
+        raise
+
+
 class HolePunchError(Exception):
     """Raised when UDP hole punching fails."""
 
@@ -106,7 +163,7 @@ async def _probe_one_peer(
         delay = PUNCH_INITIAL_DELAY
         while not received.is_set():
             try:
-                await loop.sock_sendto(sock, PUNCH_PAYLOAD, remote)
+                await _sock_sendto(loop, sock, PUNCH_PAYLOAD, remote)
             except Exception:  # noqa: BLE001
                 pass
             await asyncio.sleep(delay)
@@ -115,10 +172,23 @@ async def _probe_one_peer(
     async def _recv_loop() -> None:
         while True:
             try:
-                data, addr = await loop.sock_recvfrom(sock, 65535)
-                if addr[0] == remote[0] and addr[1] == remote[1] and data == PUNCH_PAYLOAD:
+                data, addr = await _sock_recvfrom(loop, sock, 65535)
+                if data == PUNCH_PAYLOAD and addr[0] == remote[0]:
+                    if addr[1] != remote[1]:
+                        LOGGER.warning(
+                            "[transport] hole_punch: received AXON-PUNCH from %s:%d "
+                            "but expected port %d — NAT remapped the punch socket "
+                            "(signaled port differs from actual send port)",
+                            addr[0], addr[1], remote[1],
+                        )
                     received.set()
                     return
+                if data == PUNCH_PAYLOAD:
+                    LOGGER.debug(
+                        "[transport] hole_punch: AXON-PUNCH from unexpected source %s:%d "
+                        "(expected %s:%d)",
+                        addr[0], addr[1], remote[0], remote[1],
+                    )
             except Exception:  # noqa: BLE001
                 await asyncio.sleep(0.05)
 
@@ -148,7 +218,6 @@ async def hole_punch(
     node_id: str,
     bind_host: str,
     bind_port: int,
-    stun_result: StunResult,
     peers: list[PeerEndpoint],
     timeout: float,
 ) -> dict[str, QuicConn]:

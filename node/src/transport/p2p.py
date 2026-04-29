@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Optional
 
-from transport.hole_punch import HolePunchError, discover_external_addr, hole_punch
+from transport.hole_punch import HolePunchError, hole_punch
 from transport.models import PeerEndpoint, TransportMode
 from transport.port_forward import connect_port_forward
 
@@ -65,18 +65,11 @@ class P2PTransport:
                 len(conns),
             )
         else:
-            stun_result = await discover_external_addr(self._bind_port)
-            if stun_result.is_symmetric:
-                raise ConnectionError(
-                    "Symmetric NAT detected — UDP hole punching will not work. "
-                    "See log for instructions. Use --advertise-port with a forwarded port."
-                )
             try:
                 conns = await hole_punch(
                     node_id=self._node_id,
                     bind_host=self._bind_host,
                     bind_port=self._bind_port,
-                    stun_result=stun_result,
                     peers=peers,
                     timeout=timeout,
                 )
