@@ -108,9 +108,6 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing required registration fields")
 		return
 	}
-	if registration.CallbackURL == "" {
-		registration.CallbackURL = fmt.Sprintf("http://%s:%d", registration.Host, registration.Port)
-	}
 	if registration.WorkerURL == "" {
 		registration.WorkerURL = fmt.Sprintf("http://%s:8100", registration.Host)
 	}
@@ -130,11 +127,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	nodeInfo := NodeInfo{
 		NodeID:      registration.NodeID,
-		Host:        registration.Host,
-		Port:        registration.Port,
-		VRAMGB:      registration.VRAMGB,
-		CallbackURL: strings.TrimRight(registration.CallbackURL, "/"),
-		WorkerURL:   strings.TrimRight(registration.WorkerURL, "/"),
+		Host:      registration.Host,
+		Port:      registration.Port,
+		VRAMGB:    registration.VRAMGB,
+		WorkerURL: strings.TrimRight(registration.WorkerURL, "/"),
 	}
 	if _, exists := s.nodes[registration.NodeID]; !exists {
 		s.nodeOrder = append(s.nodeOrder, registration.NodeID)
@@ -361,53 +357,13 @@ func (s *Server) checkInferenceReady(workerURL string) bool {
 }
 
 func (s *Server) broadcastStartup(targets []StartupTarget) {
-	// Deliver over WS to nodes that already have an active session.
-	// httpTargets holds nodes without a WS session and need the HTTP fallback.
-	httpTargets := s.pushStartupConfigOverWS(targets)
-
-	for _, target := range httpTargets {
-		payload, err := json.Marshal(target.Config)
-		if err != nil {
-			log.Printf("failed to marshal startup payload for node=%s: %v", target.Node.NodeID, err)
-			continue
-		}
-
-		node := target.Node
-		url := strings.TrimRight(node.CallbackURL, "/") + "/startup"
-		delivered := false
-		for attempt := 1; attempt <= 5; attempt++ {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
-			if err != nil {
-				cancel()
-				break
-			}
-			req.Header.Set("Content-Type", "application/json")
-
-			resp, err := s.client.Do(req)
-			cancel()
-			if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				resp.Body.Close()
-				delivered = true
-				log.Printf(
-					"startup signal delivered to node=%s cluster=%s stage=%d/%d (%s)",
-					node.NodeID,
-					target.Config.ClusterID,
-					target.Config.Assignment.StageIndex,
-					target.Config.Assignment.StageCount,
-					url,
-				)
-				break
-			}
-			if resp != nil {
-				resp.Body.Close()
-			}
-			log.Printf("startup signal failed for node=%s attempt=%d", node.NodeID, attempt)
-			time.Sleep(time.Duration(attempt) * 1500 * time.Millisecond)
-		}
-		if !delivered {
-			log.Printf("failed to deliver startup signal to node=%s", node.NodeID)
-		}
+	// Push startup_config over WS for nodes that already have a session.
+	// Any node that connects after this call will receive the config via the
+	// on-connect push in handleWS (buildStartupConfigWSMsg), so no fallback
+	// is needed — WS is the only delivery path that works through NAT.
+	pending := s.pushStartupConfigOverWS(targets)
+	for _, t := range pending {
+		log.Printf("[ws] no session yet for node=%s; startup_config will be pushed on connect", t.Node.NodeID)
 	}
 }
 

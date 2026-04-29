@@ -31,8 +31,8 @@ func twoNodeServer(t *testing.T) (*server.Server, *httptest.Server) {
 		"cluster-ws-test",
 		[]string{"node-a", "node-b"},
 		map[string]server.NodeInfo{
-			"node-a": {NodeID: "node-a", Host: "127.0.0.1", Port: 9000, CallbackURL: "http://127.0.0.1:9000"},
-			"node-b": {NodeID: "node-b", Host: "127.0.0.1", Port: 9001, CallbackURL: "http://127.0.0.1:9001"},
+			"node-a": {NodeID: "node-a", Host: "127.0.0.1", Port: 9000},
+			"node-b": {NodeID: "node-b", Host: "127.0.0.1", Port: 9001},
 		},
 		map[string]server.NodeAssignment{
 			"node-a": {NodeID: "node-a", StageIndex: 0, StageCount: 2, StageRole: "entry"},

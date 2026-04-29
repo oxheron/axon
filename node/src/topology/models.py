@@ -20,7 +20,6 @@ class TopologyNode(BaseModel):
     host: str
     port: int
     vram_gb: float = 0.0
-    callback_url: str
     worker_url: str
     stage_index: Optional[int] = None
     stage_role: str = ""

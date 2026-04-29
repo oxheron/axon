@@ -3,12 +3,11 @@ package server
 import "time"
 
 type NodeRegistration struct {
-	NodeID      string  `json:"node_id"`
-	Host        string  `json:"host"`
-	Port        int     `json:"port"`
-	VRAMGB      float64 `json:"vram_gb"`
-	CallbackURL string  `json:"callback_url"`
-	WorkerURL   string  `json:"worker_url"`
+	NodeID    string  `json:"node_id"`
+	Host      string  `json:"host"`
+	Port      int     `json:"port"`
+	VRAMGB    float64 `json:"vram_gb"`
+	WorkerURL string  `json:"worker_url"`
 }
 
 type PeerNode struct {
@@ -74,7 +73,6 @@ type NodeInfo struct {
 	Host            string          `json:"host"`
 	Port            int             `json:"port"`
 	VRAMGB          float64         `json:"vram_gb"`
-	CallbackURL     string          `json:"callback_url"`
 	WorkerURL       string          `json:"worker_url"`
 	StageIndex      *int            `json:"stage_index,omitempty"`
 	StageRole       string          `json:"stage_role,omitempty"`

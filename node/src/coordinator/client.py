@@ -73,7 +73,6 @@ async def register_loop(state: NodeRuntimeState) -> None:
         host=state.advertise_host,
         port=state.advertise_port,
         vram_gb=state.vram_gb,
-        callback_url=f"http://{state.advertise_host}:{state.advertise_port}",
         worker_url=state.worker_url(),
     )
     endpoint = f"{state.coordinator_url}/register"

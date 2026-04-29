@@ -13,14 +13,12 @@ func TestBuildClusterStartupConfigLocked(t *testing.T) {
 			NodeID:      "node-a",
 			Host:        "127.0.0.1",
 			Port:        9000,
-			CallbackURL: "http://127.0.0.1:9000",
 			WorkerURL:   "http://127.0.0.1:8100",
 		},
 		"node-b": {
 			NodeID:      "node-b",
 			Host:        "127.0.0.1",
 			Port:        9001,
-			CallbackURL: "http://127.0.0.1:9001",
 			WorkerURL:   "http://127.0.0.1:8101",
 		},
 	}, nil, nil, nil)
@@ -83,14 +81,12 @@ func TestBuildClusterStartupConfigLockedHonorsExplicitModeAndBackendConfig(t *te
 			NodeID:      "node-a",
 			Host:        "127.0.0.1",
 			Port:        9000,
-			CallbackURL: "http://127.0.0.1:9000",
 			WorkerURL:   "http://127.0.0.1:8100",
 		},
 		"node-b": {
 			NodeID:      "node-b",
 			Host:        "127.0.0.1",
 			Port:        9001,
-			CallbackURL: "http://127.0.0.1:9001",
 			WorkerURL:   "http://127.0.0.1:8101",
 		},
 	}, nil, nil, nil)

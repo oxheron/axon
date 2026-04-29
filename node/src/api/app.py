@@ -8,9 +8,7 @@ from fastapi import FastAPI
 from coordinator.client import register_loop
 from coordinator.ws_client import ws_session_loop
 from hardware import detect_vram_gb
-from runtime.lifecycle import apply_startup_config
 from runtime.state import NodeRuntimeState
-from topology.models import StartupConfig
 from transport.hole_punch import run_stun_discovery_for_state
 
 LOGGER = logging.getLogger(__name__)
@@ -65,11 +63,6 @@ def create_app(state: NodeRuntimeState) -> FastAPI:
             "vllm_worker_running": state.vllm_proc is not None
             and state.vllm_proc.returncode is None,
         }
-
-    @app.post("/startup")
-    async def receive_startup(config: StartupConfig) -> dict:
-        first = await apply_startup_config(state, config)
-        return {"accepted": True, "duplicate": not first}
 
     @app.get("/status")
     async def status() -> dict:

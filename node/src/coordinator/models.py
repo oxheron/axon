@@ -10,7 +10,6 @@ class NodeRegistration(BaseModel):
     host: str
     port: int
     vram_gb: float
-    callback_url: str
     worker_url: str
 
 
