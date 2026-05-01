@@ -35,7 +35,7 @@ def resolve_launch_strategy(
     if stage_count == 1:
         distributed_backend = "mp"
     else:
-        distributed_backend = "external_launcher"
+        distributed_backend = "workers.axon_executor.AxonExecutor"
 
     if execution_mode == "dry_run":
         final_lifecycle_state = "dry_run_ready"

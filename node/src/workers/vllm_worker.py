@@ -4,7 +4,10 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Optional
+
+_NODE_SRC = str(Path(__file__).parent.parent)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,7 +40,7 @@ async def start_vllm_worker_process(
     cmd = [
         sys.executable,
         "-m",
-        "vllm.entrypoints.openai.api_server",
+        "workers.vllm_launcher",
         "--host",
         "0.0.0.0",
         "--port",
@@ -60,6 +63,8 @@ async def start_vllm_worker_process(
     if extra_args:
         cmd.extend(extra_args)
     merged_env = dict(env if env is not None else os.environ)
+    existing_path = merged_env.get("PYTHONPATH", "")
+    merged_env["PYTHONPATH"] = f"{_NODE_SRC}:{existing_path}" if existing_path else _NODE_SRC
     if transport_env:
         merged_env.update(transport_env)
     LOGGER.info("Starting local vLLM worker API: %s", " ".join(cmd))

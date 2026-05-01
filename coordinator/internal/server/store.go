@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"log"
@@ -74,6 +75,39 @@ func (cs *clusterStore) add(key string, amount int64) int64 {
 	return result
 }
 
+// compareSet implements torch.distributed.Store::compare_set semantics.
+func (cs *clusterStore) compareSet(key string, expected, desired []byte) []byte {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	expiry := time.Now().Add(10 * time.Minute)
+	e, ok := cs.entries[key]
+	if !ok {
+		if len(expected) == 0 {
+			v := append([]byte(nil), desired...)
+			cs.entries[key] = &kvEntry{value: v, expiry: expiry}
+			cs.cond.Broadcast()
+			return v
+		}
+		return []byte{}
+	}
+	cur := e.value
+	if len(expected) == 0 && len(cur) == 0 {
+		v := append([]byte(nil), desired...)
+		e.value = v
+		e.expiry = expiry
+		cs.cond.Broadcast()
+		return v
+	}
+	if bytes.Equal(cur, expected) {
+		v := append([]byte(nil), desired...)
+		e.value = v
+		e.expiry = expiry
+		cs.cond.Broadcast()
+		return v
+	}
+	return append([]byte(nil), cur...)
+}
+
 func (cs *clusterStore) deleteKey(key string) bool {
 	cs.mu.Lock()
 	_, ok := cs.entries[key]
@@ -121,39 +155,46 @@ func (r *storeRegistry) deleteCluster(id string) {
 
 // ---- HTTP handler ----
 
-// handleStore routes:
+// handleStore routes (key may contain slashes; path is /store/{cluster_id}/{rest}):
 //
-//	PUT    /store/{cluster_id}/{key}           body: {"value":"<base64>"}
-//	GET    /store/{cluster_id}/{key}?timeout_ms body: {"value":"<base64>"}
-//	POST   /store/{cluster_id}/{key}/add        body: {"amount":N}  → {"value":N}
-//	DELETE /store/{cluster_id}                  cleans up the whole cluster namespace
+//	PUT    /store/{cluster_id}/{key}                body: {"value":"<base64>"}
+//	GET    /store/{cluster_id}/{key}?timeout_ms    body: {"value":"<base64>"}
+//	POST   /store/{cluster_id}/{key}/add            body: {"amount":N}  → {"value":N}
+//	POST   /store/{cluster_id}/{key}/compare_set    body: {"expected":"<b64>","desired":"<b64>"} → {"value":"<b64>"}
+//	DELETE /store/{cluster_id}                       cleans up the whole cluster namespace
 func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
-	// Strip leading /store/
 	path := strings.TrimPrefix(r.URL.Path, "/store/")
-	parts := strings.SplitN(path, "/", 3)
-
-	if len(parts) < 1 || parts[0] == "" {
+	if path == "" || strings.HasPrefix(path, "/") {
 		http.Error(w, "missing cluster_id", http.StatusBadRequest)
 		return
 	}
-	clusterID := parts[0]
 
-	// DELETE /store/{cluster_id} — clean up cluster namespace
-	if r.Method == http.MethodDelete && len(parts) == 1 {
-		s.store.deleteCluster(clusterID)
+	// DELETE /store/{cluster_id} — no key segment
+	if r.Method == http.MethodDelete && !strings.Contains(path, "/") {
+		s.store.deleteCluster(path)
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		return
 	}
 
-	if len(parts) < 2 || parts[1] == "" {
+	idx := strings.IndexByte(path, '/')
+	if idx <= 0 || idx >= len(path)-1 {
 		http.Error(w, "missing key", http.StatusBadRequest)
 		return
 	}
-	key := parts[1]
-	cs := s.store.cluster(clusterID)
+	clusterID := path[:idx]
+	rest := path[idx+1:]
+	if rest == "" {
+		http.Error(w, "missing key", http.StatusBadRequest)
+		return
+	}
 
-	// POST /store/{cluster_id}/{key}/add
-	if r.Method == http.MethodPost && len(parts) == 3 && parts[2] == "add" {
+	var key string
+	if strings.HasSuffix(rest, "/add") {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		key = strings.TrimSuffix(rest, "/add")
 		var body struct {
 			Amount int64 `json:"amount"`
 		}
@@ -161,11 +202,45 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad body", http.StatusBadRequest)
 			return
 		}
+		cs := s.store.cluster(clusterID)
 		result := cs.add(key, body.Amount)
 		writeJSON(w, http.StatusOK, map[string]int64{"value": result})
 		log.Printf("[store] add cluster=%s key=%s amount=%d -> %d", clusterID, key, body.Amount, result)
 		return
 	}
+	if strings.HasSuffix(rest, "/compare_set") {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		key = strings.TrimSuffix(rest, "/compare_set")
+		var body struct {
+			Expected string `json:"expected"`
+			Desired  string `json:"desired"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		exp, err := base64.StdEncoding.DecodeString(body.Expected)
+		if err != nil {
+			http.Error(w, "bad expected base64", http.StatusBadRequest)
+			return
+		}
+		des, err := base64.StdEncoding.DecodeString(body.Desired)
+		if err != nil {
+			http.Error(w, "bad desired base64", http.StatusBadRequest)
+			return
+		}
+		cs := s.store.cluster(clusterID)
+		out := cs.compareSet(key, exp, des)
+		encoded := base64.StdEncoding.EncodeToString(out)
+		writeJSON(w, http.StatusOK, map[string]string{"value": encoded})
+		log.Printf("[store] compare_set cluster=%s key=%s", clusterID, key)
+		return
+	}
+	key = rest
+	cs := s.store.cluster(clusterID)
 
 	switch r.Method {
 	case http.MethodPut:

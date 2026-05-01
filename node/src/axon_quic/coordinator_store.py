@@ -6,6 +6,9 @@ coordinator via the existing TCP connection established during registration.
 
 The coordinator must be running with the /store/{cluster_id}/{key} endpoint
 (coordinator/internal/server/store.go).
+
+Store keys from PyTorch (e.g. Gloo) may contain ``/``. They are mapped to a
+single path segment via URL-safe base64 so HTTP routing stays unambiguous.
 """
 from __future__ import annotations
 
@@ -15,13 +18,19 @@ from datetime import timedelta
 from typing import Union
 
 import httpx
+from torch.distributed import Store
 
 LOGGER = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 60.0  # seconds for get/wait operations
 
 
-class AxonCoordinatorStore:
+def _path_segment_for_key(key: str) -> str:
+    """Map a logical store key to one URL path segment (no raw slashes)."""
+    return base64.urlsafe_b64encode(key.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+class AxonCoordinatorStore(Store):
     """torch.distributed.Store-compatible KV store over coordinator HTTP."""
 
     def __init__(
@@ -30,13 +39,18 @@ class AxonCoordinatorStore:
         cluster_id: str,
         default_timeout: float = _DEFAULT_TIMEOUT,
     ) -> None:
+        super().__init__()
         self._base = coordinator_url.rstrip("/")
         self._cluster_id = cluster_id
         self._timeout = default_timeout
         self._client = httpx.Client(timeout=default_timeout + 5.0)
 
-    def _url(self, key: str) -> str:
-        return f"{self._base}/store/{self._cluster_id}/{key}"
+    def _url(self, key: str, *, suffix: str | None = None) -> str:
+        seg = _path_segment_for_key(key)
+        u = f"{self._base}/store/{self._cluster_id}/{seg}"
+        if suffix:
+            u += f"/{suffix}"
+        return u
 
     # ── torch.distributed.Store interface ──────────────────────────────
 
@@ -68,9 +82,10 @@ class AxonCoordinatorStore:
     ) -> None:
         timeout_secs = self._timeout
         if isinstance(timeout, timedelta):
-            timeout_secs = timeout.total_seconds()
+            ts = timeout.total_seconds()
+            timeout_secs = self._timeout if ts <= 0 else ts
         elif isinstance(timeout, (int, float)):
-            timeout_secs = float(timeout)
+            timeout_secs = self._timeout if float(timeout) <= 0 else float(timeout)
         for key in keys:
             timeout_ms = int(timeout_secs * 1000)
             resp = self._client.get(
@@ -84,11 +99,25 @@ class AxonCoordinatorStore:
 
     def add(self, key: str, amount: int) -> int:
         resp = self._client.post(
-            f"{self._url(key)}/add",
+            self._url(key, suffix="add"),
             json={"amount": amount},
         )
         resp.raise_for_status()
         return int(resp.json()["value"])
+
+    def compare_set(self, key: str, expected: str | bytes, desired: str | bytes) -> bytes:
+        """Atomic compare-and-set; c10d passes str (Latin-1 byte carriers) or bytes."""
+        exp_b = expected if isinstance(expected, bytes) else expected.encode("latin-1")
+        des_b = desired if isinstance(desired, bytes) else desired.encode("latin-1")
+        exp64 = base64.b64encode(exp_b).decode()
+        des64 = base64.b64encode(des_b).decode()
+        resp = self._client.post(
+            self._url(key, suffix="compare_set"),
+            json={"expected": exp64, "desired": des64},
+        )
+        resp.raise_for_status()
+        out = resp.json()["value"]
+        return base64.b64decode(out)
 
     def delete_key(self, key: str) -> bool:
         try:

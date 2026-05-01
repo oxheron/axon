@@ -54,7 +54,7 @@ if "httpx" not in sys.modules:
     sys.modules["httpx"] = httpx_stub
 
 import httpx
-from axon_quic.coordinator_store import AxonCoordinatorStore
+from axon_quic.coordinator_store import AxonCoordinatorStore, _path_segment_for_key
 
 
 class TestAxonCoordinatorStore:
@@ -78,7 +78,7 @@ class TestAxonCoordinatorStore:
         store.set("rank", b"\x00\x01\x02")
         assert len(calls) == 1
         url, body = calls[0]
-        assert "/store/cluster-test/rank" in url
+        assert f"/store/cluster-test/{_path_segment_for_key('rank')}" in url
         assert body["value"] == base64.b64encode(b"\x00\x01\x02").decode()
 
     def test_get_decodes_base64(self, monkeypatch):
@@ -136,8 +136,8 @@ class TestAxonCoordinatorStore:
         monkeypatch.setattr(store._client, "get", fake_get)
         store.wait(["k1", "k2"])
         assert len(calls) == 2
-        assert any("k1" in u for u in calls)
-        assert any("k2" in u for u in calls)
+        assert any(_path_segment_for_key("k1") in u for u in calls)
+        assert any(_path_segment_for_key("k2") in u for u in calls)
 
     def test_set_timeout(self):
         store = self._store()
