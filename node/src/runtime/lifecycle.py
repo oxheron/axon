@@ -109,6 +109,10 @@ async def _launch_worker_for_strategy(
     await asyncio.to_thread(_preflight_vllm_for_accelerator, accel)
     vllm_env = build_vllm_worker_environ(accel)
     vllm_env.update(state.startup_config.backend_config.env_overrides)
+    if state.assignment.stage_count > 1:
+        from axon_quic.gloo_socket_env import apply_default_gloo_socket_ifname
+
+        apply_default_gloo_socket_ifname(vllm_env, pp_size=state.assignment.stage_count)
     if strategy.execution_mode == "coordinator_slice":
         LOGGER.info(
             "Using coordinator-assigned slice mode for stage=%s/%s; "

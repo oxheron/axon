@@ -106,6 +106,9 @@ def _maybe_init_process_group() -> None:
             return
 
         from axon_quic.coordinator_store import AxonCoordinatorStore
+        from axon_quic.gloo_socket_env import apply_default_gloo_socket_ifname
+
+        apply_default_gloo_socket_ifname(pp_size=pp_size)
 
         LOGGER.info(
             "[axon_quic] initializing torch.distributed rank=%d world=%d via coordinator %s",
