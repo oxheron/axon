@@ -58,6 +58,8 @@ class AxonQuicProcessGroup:
         self._rank = _get_rank()
         self._size = _get_size()
         self._wire_dtype = _get_wire_dtype()
+        self._store = store  # coordinator-backed store used for barrier
+        self._barrier_count = 0
 
         uds_path = os.environ.get("AXON_TRANSPORT_UDS", "")
         if not uds_path:
@@ -147,8 +149,25 @@ class AxonQuicProcessGroup:
     def reduce_scatter(self, *args: Any, **kwargs: Any) -> None:
         raise NotImplementedError("axon_quic: reduce_scatter not supported on PP group")
 
-    def barrier(self, *args: Any, **kwargs: Any) -> None:
-        raise NotImplementedError("axon_quic: barrier not supported on PP group")
+    def barrier(self, opts: Any = None) -> None:
+        import time
+
+        arrive_key = f"axon_barrier_{self._barrier_count}_arrive"
+        done_key = f"axon_barrier_{self._barrier_count}_done"
+        self._barrier_count += 1
+        n = self._store.add(arrive_key, 1)
+        if n >= self._size:
+            self._store.set(done_key, b"1")
+        else:
+            deadline = time.monotonic() + 120.0
+            while time.monotonic() < deadline:
+                try:
+                    self._store.wait([done_key], 2.0)
+                    break
+                except TimeoutError:
+                    continue
+            else:
+                raise TimeoutError(f"axon_quic barrier timed out at {arrive_key}")
 
     # ── ProcessGroup protocol attributes ─────────────────────────────────
 

@@ -121,12 +121,12 @@ def _maybe_init_process_group() -> None:
             cluster_id=cluster_id,
         )
         dist.init_process_group(
-            backend="gloo",
+            backend="axon_quic",
             store=store,
             rank=pp_rank,
             world_size=pp_size,
         )
-        LOGGER.info("[axon_quic] torch.distributed initialized (gloo, rank=%d/%d)", pp_rank, pp_size)
+        LOGGER.info("[axon_quic] torch.distributed initialized (axon_quic, rank=%d/%d)", pp_rank, pp_size)
     except ImportError:
         LOGGER.debug("[axon_quic] torch not available, skipping init_process_group")
     except Exception:

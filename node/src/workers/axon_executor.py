@@ -26,19 +26,13 @@ class AxonExecutor(UniProcExecutor):
         _register_backend()
         _maybe_patch_vllm()
 
-        from axon_quic.gloo_socket_env import apply_default_gloo_socket_ifname
-
-        apply_default_gloo_socket_ifname(
-            pp_size=int(os.environ.get("AXON_PP_SIZE", "1")),
-        )
-
         if not dist.is_initialized():
             store = AxonCoordinatorStore(
                 coordinator_url=os.environ["AXON_COORDINATOR_URL"],
                 cluster_id=os.environ["AXON_CLUSTER_ID"],
             )
             dist.init_process_group(
-                backend="gloo",
+                backend="axon_quic",
                 store=store,
                 rank=int(os.environ["AXON_PP_RANK"]),
                 world_size=int(os.environ["AXON_PP_SIZE"]),
