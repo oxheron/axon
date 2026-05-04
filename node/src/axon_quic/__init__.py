@@ -83,6 +83,11 @@ def _maybe_patch_vllm() -> None:
                         kw["backend"] = "axon_quic"
                     return orig_new_group(*a, **kw)
 
+                # PP tensors travel over QUIC, not NCCL. Disable device_communicator
+                # (PyNcclCommunicator) for PP groups — it calls dist.broadcast to
+                # exchange NCCL IDs, which we don't support and don't need.
+                kwargs["use_device_communicator"] = False
+
                 _dist.new_group = _redirect_new_group
                 try:
                     orig_init(self, group_ranks, local_rank, torch_distributed_backend, *args, **kwargs)
