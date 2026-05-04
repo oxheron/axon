@@ -21,6 +21,9 @@ PUNCH_BACKOFF_BASE = 0.2
 PUNCH_BACKOFF_MAX = 2.0
 PUNCH_PAYLOAD = b"AXON-PUNCH"
 PUNCH_TIMEOUT = 30.0
+PUNCH_POST_RECV_PROBES = 8   # extra probes after receiving peer's probe so the peer can complete its own punch
+PUNCH_MAX_ATTEMPTS = 3
+PUNCH_RETRY_DELAY = 2.0
 
 
 async def _sock_recvfrom(
@@ -144,74 +147,106 @@ async def discover_external_addr(bind_port: int) -> StunResult:
         return StunResult(external_ip="", external_port=0, nat_type="unknown", is_symmetric=True)
 
 
-async def _probe_one_peer(
+async def _probe_send_loop(
+    loop: asyncio.AbstractEventLoop,
     sock: socket.socket,
     peer: PeerEndpoint,
-    self_node_id: str,
+    received: asyncio.Event,
 ) -> None:
     """
-    Simultaneous open for one peer.
-    Sends AXON-PUNCH probes with exponential backoff while listening for an
-    incoming probe from the peer. Raises asyncio.TimeoutError if not completed
-    within PUNCH_TIMEOUT.
+    Send AXON-PUNCH probes to one peer with exponential backoff until the peer's probe
+    arrives, then send PUNCH_POST_RECV_PROBES more probes so the peer can complete its
+    own punch (avoids the race where we cancel our send loop before the peer has received
+    any of our probes).
     """
-    loop = asyncio.get_running_loop()
     remote = (peer.external_addr, peer.external_port)
-    received = asyncio.Event()
+    delay = PUNCH_INITIAL_DELAY
+    while not received.is_set():
+        try:
+            await _sock_sendto(loop, sock, PUNCH_PAYLOAD, remote)
+        except Exception:  # noqa: BLE001
+            pass
+        await asyncio.sleep(delay)
+        delay = min(delay * 2 if delay > 0 else PUNCH_BACKOFF_BASE, PUNCH_BACKOFF_MAX)
+    # Drain: keep sending a short burst so the peer's recv loop sees at least one probe.
+    for _ in range(PUNCH_POST_RECV_PROBES):
+        try:
+            await _sock_sendto(loop, sock, PUNCH_PAYLOAD, remote)
+        except Exception:  # noqa: BLE001
+            pass
+        await asyncio.sleep(PUNCH_INITIAL_DELAY)
 
-    async def _send_loop() -> None:
-        delay = PUNCH_INITIAL_DELAY
-        while not received.is_set():
-            try:
-                await _sock_sendto(loop, sock, PUNCH_PAYLOAD, remote)
-            except Exception:  # noqa: BLE001
-                pass
-            await asyncio.sleep(delay)
-            delay = min(delay * 2 if delay > 0 else PUNCH_BACKOFF_BASE, PUNCH_BACKOFF_MAX)
 
-    async def _recv_loop() -> None:
-        while True:
-            try:
-                data, addr = await _sock_recvfrom(loop, sock, 65535)
-                if data == PUNCH_PAYLOAD and addr[0] == remote[0]:
-                    if addr[1] != remote[1]:
-                        LOGGER.warning(
-                            "[transport] hole_punch: received AXON-PUNCH from %s:%d "
-                            "but expected port %d — NAT remapped the punch socket "
-                            "(signaled port differs from actual send port)",
-                            addr[0], addr[1], remote[1],
-                        )
-                    received.set()
-                    return
-                if data == PUNCH_PAYLOAD:
-                    LOGGER.debug(
-                        "[transport] hole_punch: AXON-PUNCH from unexpected source %s:%d "
-                        "(expected %s:%d)",
-                        addr[0], addr[1], remote[0], remote[1],
-                    )
-            except Exception:  # noqa: BLE001
-                await asyncio.sleep(0.05)
+async def _probe_recv_loop(
+    loop: asyncio.AbstractEventLoop,
+    sock: socket.socket,
+    peers: list[PeerEndpoint],
+    received: dict[str, asyncio.Event],
+) -> None:
+    """
+    Single shared recv loop for all peers.
+    Having one reader on the socket avoids the fd-reader conflict that arises when
+    multiple concurrent _probe tasks each call loop.add_reader on the same fd —
+    asyncio silently replaces the previous handler, starving all but the last peer.
+    """
+    addr_to_peer: dict[str, PeerEndpoint] = {p.external_addr: p for p in peers}
+    while True:
+        try:
+            data, addr = await _sock_recvfrom(loop, sock, 65535)
+        except Exception:  # noqa: BLE001
+            await asyncio.sleep(0.05)
+            continue
+        if data != PUNCH_PAYLOAD:
+            continue
+        peer = addr_to_peer.get(addr[0])
+        if peer is None:
+            LOGGER.debug(
+                "[transport] hole_punch: AXON-PUNCH from unknown source %s:%d",
+                addr[0], addr[1],
+            )
+            continue
+        if addr[1] != peer.external_port:
+            LOGGER.warning(
+                "[transport] hole_punch: AXON-PUNCH from %s:%d but expected port %d "
+                "— NAT remapped the punch socket (signaled port differs from actual send port)",
+                addr[0], addr[1], peer.external_port,
+            )
+        if not received[peer.node_id].is_set():
+            received[peer.node_id].set()
+            LOGGER.info(
+                "[transport] hole_punch: path open to peer=%s addr=%s:%d",
+                peer.node_id, addr[0], addr[1],
+            )
 
-    send_task = asyncio.create_task(_send_loop())
-    recv_task = asyncio.create_task(_recv_loop())
+
+async def _attempt_hole_punch(
+    loop: asyncio.AbstractEventLoop,
+    sock: socket.socket,
+    peers: list[PeerEndpoint],
+) -> None:
+    """One attempt at simultaneous-open for all peers. Raises asyncio.TimeoutError on timeout."""
+    received: dict[str, asyncio.Event] = {p.node_id: asyncio.Event() for p in peers}
+
+    send_tasks = [
+        asyncio.create_task(_probe_send_loop(loop, sock, peer, received[peer.node_id]))
+        for peer in peers
+    ]
+    recv_task = asyncio.create_task(_probe_recv_loop(loop, sock, peers, received))
+
     try:
-        await asyncio.wait_for(received.wait(), timeout=PUNCH_TIMEOUT)
+        await asyncio.wait_for(
+            asyncio.gather(*(received[p.node_id].wait() for p in peers)),
+            timeout=PUNCH_TIMEOUT,
+        )
     finally:
-        send_task.cancel()
         recv_task.cancel()
-        try:
-            await send_task
-        except asyncio.CancelledError:
-            pass
-        try:
-            await recv_task
-        except asyncio.CancelledError:
-            pass
-
-    LOGGER.info(
-        "[transport] hole_punch: path open to peer=%s addr=%s:%d",
-        peer.node_id, peer.external_addr, peer.external_port,
-    )
+        for t in send_tasks:
+            t.cancel()
+        for t in [recv_task, *send_tasks]:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
 
 
 async def hole_punch(
@@ -222,7 +257,7 @@ async def hole_punch(
     timeout: float,
 ) -> dict[str, QuicConn]:
     """
-    Bind UDP socket. Perform simultaneous open for all peers, then QUIC handshake.
+    Bind UDP socket. Perform simultaneous open for all peers (with retries), then QUIC handshake.
     Role determined by lexicographic node_id comparison (same as port_forward).
     Raises HolePunchError on failure.
     """
@@ -235,26 +270,34 @@ async def hole_punch(
 
     LOGGER.info("[transport] hole_punch: bound udp=%s:%d", bind_host, bind_port)
 
-    # Simultaneous open for all peers concurrently.
-    try:
-        await asyncio.gather(
-            *(_probe_one_peer(sock, peer, node_id) for peer in peers)
-        )
-    except asyncio.TimeoutError:
-        sock.close()
-        peer_strs = ", ".join(
-            f"{p.node_id} ({p.external_addr}:{p.external_port})" for p in peers
-        )
-        msg = (
-            f"[transport] hole_punch: timed out after {PUNCH_TIMEOUT}s waiting for peers: "
-            f"{peer_strs}. NAT punch failed. Consider using --advertise-port with a manually "
-            "forwarded UDP port, or wait for TURN relay in a future release."
-        )
-        LOGGER.error(msg)
-        raise HolePunchError(msg)
-    except Exception as exc:
-        sock.close()
-        raise HolePunchError(f"hole punch error: {exc}") from exc
+    loop = asyncio.get_running_loop()
+    peer_strs = ", ".join(f"{p.node_id} ({p.external_addr}:{p.external_port})" for p in peers)
+
+    for attempt in range(1, PUNCH_MAX_ATTEMPTS + 1):
+        try:
+            await _attempt_hole_punch(loop, sock, peers)
+            break  # all peers punched
+        except asyncio.TimeoutError:
+            if attempt < PUNCH_MAX_ATTEMPTS:
+                LOGGER.warning(
+                    "[transport] hole_punch: attempt %d/%d timed out for peers: %s "
+                    "— retrying in %.1fs",
+                    attempt, PUNCH_MAX_ATTEMPTS, peer_strs, PUNCH_RETRY_DELAY,
+                )
+                await asyncio.sleep(PUNCH_RETRY_DELAY)
+            else:
+                msg = (
+                    f"[transport] hole_punch: all {PUNCH_MAX_ATTEMPTS} attempts timed out "
+                    f"after {PUNCH_TIMEOUT}s waiting for peers: {peer_strs}. "
+                    "NAT punch failed. Consider using --advertise-port with a manually "
+                    "forwarded UDP port, or wait for TURN relay in a future release."
+                )
+                LOGGER.error(msg)
+                sock.close()
+                raise HolePunchError(msg)
+        except Exception as exc:
+            sock.close()
+            raise HolePunchError(f"hole punch error: {exc}") from exc
 
     # UDP path is open — proceed to QUIC handshake on the same socket.
     conns: dict[str, QuicConn] = {}
