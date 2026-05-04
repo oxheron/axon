@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 from coordinator.client import report_node_status, wait_for_worker_health
 from hardware import (
@@ -20,6 +22,38 @@ if TYPE_CHECKING:
     from topology.models import StartupConfig
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _is_private_addr(addr: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(addr)
+        return ip.is_private or ip.is_loopback
+    except ValueError:
+        # Hostname like "localhost" — treat as private.
+        return addr.lower() in ("localhost",)
+
+
+def _coordinator_host(coordinator_url: str) -> str:
+    return urlparse(coordinator_url).hostname or ""
+
+
+def _resolve_peer_addr(raw_addr: str, coordinator_url: str, peer_node_id: str) -> str:
+    """
+    If a peer advertised a private/loopback IP (STUN failed, fell back to LAN IP),
+    substitute the coordinator's host — which we already know is reachable and is
+    likely the same machine as the co-located peer.
+    """
+    if not _is_private_addr(raw_addr):
+        return raw_addr
+    coordinator_host = _coordinator_host(coordinator_url)
+    if not coordinator_host:
+        return raw_addr
+    LOGGER.warning(
+        "[transport] peer=%s advertised private addr %s — "
+        "substituting coordinator host %s (peer likely co-located with coordinator)",
+        peer_node_id, raw_addr, coordinator_host,
+    )
+    return coordinator_host
 
 
 async def _run_dry_run_strategy(
@@ -259,7 +293,9 @@ async def handle_cluster_start(state: NodeRuntimeState) -> None:
             peers = [
                 PeerEndpoint(
                     node_id=p.node_id,
-                    external_addr=p.external_addr,
+                    external_addr=_resolve_peer_addr(
+                        p.external_addr, state.coordinator_url, p.node_id
+                    ),
                     external_port=p.external_port,
                     transport_mode=TransportMode(p.transport_mode),
                 )
