@@ -38,6 +38,15 @@ class AxonExecutor(UniProcExecutor):
                 world_size=int(os.environ["AXON_PP_SIZE"]),
             )
 
+        pp_size = int(os.environ.get("AXON_PP_SIZE", "1"))
+        if pp_size > 1:
+            # vLLM defaults nnodes=1, making local_world_size = world_size (pp*tp)
+            # which requires all GPUs to be local. Each axon node runs exactly one
+            # PP stage, so nnodes=pp_size gives local_world_size = world_size/pp_size
+            # = tp_size, which is the correct number of GPUs per node.
+            # This scales: PP=4/TP=2 → world=8, nnodes=4, local_world_size=2 ✓
+            self.vllm_config.parallel_config.nnodes = pp_size
+
         super()._init_executor()
 
     def _distributed_args(self) -> tuple[str, int, int]:
