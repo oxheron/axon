@@ -161,11 +161,21 @@ async def _probe_send_loop(
     """
     remote = (peer.external_addr, peer.external_port)
     delay = PUNCH_INITIAL_DELAY
+    probe_count = 0
     while not received.is_set():
         try:
             await _sock_sendto(loop, sock, PUNCH_PAYLOAD, remote)
-        except Exception:  # noqa: BLE001
-            pass
+            probe_count += 1
+            if probe_count == 1 or probe_count % 10 == 0:
+                LOGGER.info(
+                    "[transport] hole_punch: sent probe #%d to peer=%s target=%s:%d",
+                    probe_count, peer.node_id, peer.external_addr, peer.external_port,
+                )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "[transport] hole_punch: send error to %s:%d — %s",
+                peer.external_addr, peer.external_port, exc,
+            )
         await asyncio.sleep(delay)
         delay = min(delay * 2 if delay > 0 else PUNCH_BACKOFF_BASE, PUNCH_BACKOFF_MAX)
     # Drain: keep sending a short burst so the peer's recv loop sees at least one probe.
@@ -188,29 +198,52 @@ async def _probe_recv_loop(
     Having one reader on the socket avoids the fd-reader conflict that arises when
     multiple concurrent _probe tasks each call loop.add_reader on the same fd —
     asyncio silently replaces the previous handler, starving all but the last peer.
+    Accepts AXON-PUNCH from an unexpected source IP (single-peer CGNAT fallback).
     """
     addr_to_peer: dict[str, PeerEndpoint] = {p.external_addr: p for p in peers}
+    # Peers still waiting for their first probe (used for the single-peer CGNAT fallback).
+    unresolved = [p for p in peers]
     while True:
         try:
             data, addr = await _sock_recvfrom(loop, sock, 65535)
         except Exception:  # noqa: BLE001
             await asyncio.sleep(0.05)
             continue
+
         if data != PUNCH_PAYLOAD:
-            continue
-        peer = addr_to_peer.get(addr[0])
-        if peer is None:
             LOGGER.debug(
-                "[transport] hole_punch: AXON-PUNCH from unknown source %s:%d",
-                addr[0], addr[1],
+                "[transport] hole_punch: non-punch packet from %s:%d len=%d",
+                addr[0], addr[1], len(data),
             )
             continue
-        if addr[1] != peer.external_port:
+
+        peer = addr_to_peer.get(addr[0])
+        if peer is None:
+            # Source IP doesn't match any signaled address — could be CGNAT remapping.
+            # If there is exactly one peer still unresolved, accept it optimistically.
+            still_waiting = [p for p in unresolved if not received[p.node_id].is_set()]
+            if len(still_waiting) == 1:
+                peer = still_waiting[0]
+                LOGGER.warning(
+                    "[transport] hole_punch: AXON-PUNCH from unexpected source %s:%d "
+                    "(expected %s:%d) — accepting as peer=%s (possible CGNAT remapping)",
+                    addr[0], addr[1], peer.external_addr, peer.external_port, peer.node_id,
+                )
+            else:
+                LOGGER.warning(
+                    "[transport] hole_punch: AXON-PUNCH from unknown source %s:%d "
+                    "(known peers: %s) — ignoring",
+                    addr[0], addr[1],
+                    ", ".join(f"{p.external_addr}:{p.external_port}" for p in peers),
+                )
+                continue
+        elif addr[1] != peer.external_port:
             LOGGER.warning(
                 "[transport] hole_punch: AXON-PUNCH from %s:%d but expected port %d "
                 "— NAT remapped the punch socket (signaled port differs from actual send port)",
                 addr[0], addr[1], peer.external_port,
             )
+
         if not received[peer.node_id].is_set():
             received[peer.node_id].set()
             LOGGER.info(
@@ -225,6 +258,11 @@ async def _attempt_hole_punch(
     peers: list[PeerEndpoint],
 ) -> None:
     """One attempt at simultaneous-open for all peers. Raises asyncio.TimeoutError on timeout."""
+    for peer in peers:
+        LOGGER.info(
+            "[transport] hole_punch: targeting peer=%s external=%s:%d",
+            peer.node_id, peer.external_addr, peer.external_port,
+        )
     received: dict[str, asyncio.Event] = {p.node_id: asyncio.Event() for p in peers}
 
     send_tasks = [
