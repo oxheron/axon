@@ -1,18 +1,27 @@
 """AxonQuicProcessGroup — custom torch.distributed ProcessGroup for PP tensors.
 
-Registered as the "axon_quic" backend. Handles only the point-to-point
-operations that vLLM's PP path uses:
-  - isend / irecv  (async, but returns a pre-completed AxonWork for B-3)
-  - send / recv    (synchronous wrappers)
+Registered as the "axon_quic" backend. Handles the point-to-point operations
+that vLLM's PP path uses:
+  - isend / irecv  (async, returns AxonWork)
+  - send / recv    (synchronous, returns AxonWork)
+  - barrier        (coordinator-store-based, returns c10d Work)
   - broadcast_object_list  (for GroupCoordinator CPU metadata exchange)
 
-All data travels over the UDS sidecar → QUIC path established by B-2.
+All tensor data travels over the UDS sidecar → QUIC path established by B-2.
+
+Inherits from torch.distributed.ProcessGroup (c10d::ProcessGroup) so that
+PyTorch's _new_process_group_helper takes the PythonProcessGroup shortcut
+(issubclass check) and never calls _register_backend, which requires c10d::Backend.
 """
 from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import TYPE_CHECKING, Any
+
+import torch.distributed as dist
+from torch._C._distributed_c10d import _create_work_from_future
 
 from axon_quic.work import AxonWork
 from axon_quic.wire import (
@@ -43,22 +52,36 @@ def _get_wire_dtype() -> str:
     return os.environ.get("AXON_WIRE_DTYPE", "fp8")
 
 
-class AxonQuicProcessGroup:
+def _completed_work() -> Any:
+    """Return a pre-completed c10d Work object (required by C++ dispatch path)."""
+    from torch.futures import Future
+    fut: Future = Future()
+    fut.set_result(None)
+    return _create_work_from_future(fut)
+
+
+class AxonQuicProcessGroup(dist.ProcessGroup):
     """
     Custom torch.distributed ProcessGroup that routes PP tensors over QUIC.
 
-    Created by PyTorch's new_group() machinery when backend="axon_quic" is
-    requested. The constructor signature (store, rank, size) is standard for
-    registered Python backends.
+    Inheriting from dist.ProcessGroup lets PyTorch use this instance directly
+    as the process group without going through _register_backend (which requires
+    a c10d::Backend subclass that we cannot satisfy from pure Python).
+
+    The constructor signature (store, rank, size, timeout) is the standard
+    factory signature used by torch.distributed.Backend.register_backend.
     """
 
     def __init__(self, store: Any, rank: int, size: int, timeout: Any = None) -> None:
-        # Store rank/size for reference; actual rank/size come from env vars set
-        # by the node process to match the PP assignment.
-        self._rank = _get_rank()
-        self._size = _get_size()
+        pg_rank = _get_rank()
+        pg_size = _get_size()
+        # c10d::ProcessGroup(rank, world_size) — store is managed separately
+        super().__init__(pg_rank, pg_size)
+
+        self._rank = pg_rank
+        self._size = pg_size
         self._wire_dtype = _get_wire_dtype()
-        self._store = store  # coordinator-backed store used for barrier
+        self._store = store  # coordinator-backed store, used for barrier
         self._barrier_count = 0
 
         uds_path = os.environ.get("AXON_TRANSPORT_UDS", "")
@@ -85,7 +108,8 @@ class AxonQuicProcessGroup:
             return AxonWork()
         except Exception as exc:
             LOGGER.error("[axon_quic] isend failed: %s", exc)
-            return AxonWork(exc=ConnectionError(f"axon_quic isend: {exc}") if not isinstance(exc, ConnectionError) else exc)
+            err = exc if isinstance(exc, ConnectionError) else ConnectionError(f"axon_quic isend: {exc}")
+            return AxonWork(exc=err)
 
     def irecv(self, tensors: list["torch.Tensor"], src: int, tag: int) -> AxonWork:
         try:
@@ -95,13 +119,18 @@ class AxonQuicProcessGroup:
             return AxonWork()
         except Exception as exc:
             LOGGER.error("[axon_quic] irecv failed: %s", exc)
-            return AxonWork(exc=ConnectionError(f"axon_quic irecv: {exc}") if not isinstance(exc, ConnectionError) else exc)
+            err = exc if isinstance(exc, ConnectionError) else ConnectionError(f"axon_quic irecv: {exc}")
+            return AxonWork(exc=err)
 
-    def send(self, tensors: list["torch.Tensor"], dst: int, tag: int) -> None:
-        self.isend(tensors, dst, tag).wait()
+    def send(self, tensors: list["torch.Tensor"], dst: int, tag: int) -> AxonWork:
+        work = self.isend(tensors, dst, tag)
+        work.wait()
+        return work
 
-    def recv(self, tensors: list["torch.Tensor"], src: int, tag: int) -> None:
-        self.irecv(tensors, src, tag).wait()
+    def recv(self, tensors: list["torch.Tensor"], src: int, tag: int) -> AxonWork:
+        work = self.irecv(tensors, src, tag)
+        work.wait()
+        return work
 
     # ── Object send/recv (for GroupCoordinator CPU metadata group) ────────
 
@@ -110,16 +139,14 @@ class AxonQuicProcessGroup:
     ) -> None:
         """Broadcast a list of objects from rank `src` to all ranks in the group."""
         if self._rank == src:
-            # Encode and send to all other ranks
             frame = encode_object_frame(obj_list, stream_id=0)
-            for rank in range(self._size):
-                if rank != src:
+            for r in range(self._size):
+                if r != src:
                     try:
-                        self._client.send_obj(peer_idx=rank, stream_id=0, frame=frame)
+                        self._client.send_obj(peer_idx=r, stream_id=0, frame=frame)
                     except Exception as exc:
                         raise ConnectionError(f"axon_quic broadcast_object_list send: {exc}") from exc
         else:
-            # Receive from src
             try:
                 frame = self._client.recv_obj(peer_idx=src, stream_id=0)
                 result = decode_object_frame(frame)
@@ -135,23 +162,9 @@ class AxonQuicProcessGroup:
         frame = self._client.recv_obj(peer_idx=src, stream_id=stream_id)
         return decode_object_frame(frame)
 
-    # ── Collective stubs — raise if called on PP group ────────────────────
+    # ── Barrier — coordinator-store-based, returns c10d Work ─────────────
 
-    def allreduce(self, *args: Any, **kwargs: Any) -> None:
-        raise NotImplementedError("axon_quic: allreduce not supported on PP group")
-
-    def broadcast(self, *args: Any, **kwargs: Any) -> None:
-        raise NotImplementedError("axon_quic: broadcast not supported on PP group")
-
-    def allgather(self, *args: Any, **kwargs: Any) -> None:
-        raise NotImplementedError("axon_quic: allgather not supported on PP group")
-
-    def reduce_scatter(self, *args: Any, **kwargs: Any) -> None:
-        raise NotImplementedError("axon_quic: reduce_scatter not supported on PP group")
-
-    def barrier(self, opts: Any = None) -> None:
-        import time
-
+    def barrier(self, opts: Any = None) -> Any:
         arrive_key = f"axon_barrier_{self._barrier_count}_arrive"
         done_key = f"axon_barrier_{self._barrier_count}_done"
         self._barrier_count += 1
@@ -168,8 +181,26 @@ class AxonQuicProcessGroup:
                     continue
             else:
                 raise TimeoutError(f"axon_quic barrier timed out at {arrive_key}")
+        return _completed_work()
 
-    # ── ProcessGroup protocol attributes ─────────────────────────────────
+    # ── Collective stubs ──────────────────────────────────────────────────
+
+    def allreduce(self, tensors: Any, opts: Any = None) -> Any:
+        raise NotImplementedError("axon_quic: allreduce not supported")
+
+    def broadcast(self, tensors: Any, opts: Any = None) -> Any:
+        raise NotImplementedError("axon_quic: broadcast not supported")
+
+    def allgather(self, output: Any, input: Any, opts: Any = None) -> Any:
+        raise NotImplementedError("axon_quic: allgather not supported")
+
+    def reduce_scatter(self, output: Any, input: Any, opts: Any = None) -> Any:
+        raise NotImplementedError("axon_quic: reduce_scatter not supported")
+
+    # ── ProcessGroup protocol ─────────────────────────────────────────────
+
+    def getBackendName(self) -> str:
+        return "axon_quic"
 
     def rank(self) -> int:
         return self._rank

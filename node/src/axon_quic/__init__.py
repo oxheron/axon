@@ -54,7 +54,10 @@ def _maybe_patch_vllm() -> None:
     try:
         from vllm.distributed import parallel_state
 
+        import torch.distributed as _dist
+
         orig_init = parallel_state.GroupCoordinator.__init__
+        orig_new_group = _dist.new_group
 
         def _patched_init(
             self: Any,
@@ -71,7 +74,22 @@ def _maybe_patch_vllm() -> None:
                     "for %d-rank group (PP group)", pp_size
                 )
                 torch_distributed_backend = "axon_quic"
-            orig_init(self, group_ranks, local_rank, torch_distributed_backend, *args, **kwargs)
+
+                # GroupCoordinator always creates a cpu_group with backend="gloo"
+                # (hardcoded in vLLM). Gloo requires direct TCP between nodes, which
+                # fails over NAT. Redirect it to axon_quic for the duration of this init.
+                def _redirect_new_group(*a: Any, **kw: Any) -> Any:
+                    if kw.get("backend") == "gloo":
+                        kw["backend"] = "axon_quic"
+                    return orig_new_group(*a, **kw)
+
+                _dist.new_group = _redirect_new_group
+                try:
+                    orig_init(self, group_ranks, local_rank, torch_distributed_backend, *args, **kwargs)
+                finally:
+                    _dist.new_group = orig_new_group
+            else:
+                orig_init(self, group_ranks, local_rank, torch_distributed_backend, *args, **kwargs)
 
         parallel_state.GroupCoordinator.__init__ = _patched_init
         LOGGER.info("[axon_quic] GroupCoordinator patched for pp_size=%d", pp_size)
@@ -106,9 +124,6 @@ def _maybe_init_process_group() -> None:
             return
 
         from axon_quic.coordinator_store import AxonCoordinatorStore
-        from axon_quic.gloo_socket_env import apply_default_gloo_socket_ifname
-
-        apply_default_gloo_socket_ifname(pp_size=pp_size)
 
         LOGGER.info(
             "[axon_quic] initializing torch.distributed rank=%d world=%d via coordinator %s",
